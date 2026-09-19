@@ -7,5 +7,4 @@ description = "Read-only X11 application and window identity probe"
 license = "MIT"
 
 [dependencies]
-x11rb = { version = "0.14.0", default-features = false, features = ["allow-unsafe-code"] }
-
+x11rb = { version = "0.14.0", default-features = false }
