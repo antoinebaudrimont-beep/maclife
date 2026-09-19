@@ -40,12 +40,13 @@ All X11 atom lookups use `only_if_exists`, so inspection does not even create se
 The generic `WM_CLASS` path remains primary. The only application aliases currently normalize the five reference applications:
 
 - `Chatgpt` -> `chatgpt`
-- `Brave-browser` -> `brave`
+- `Brave-browser` -> `brave-browser`
+- `Brave-origin` -> `brave-origin`
 - `Xfce4-terminal` -> `xfce4-terminal`
 - `Thunar` -> `thunar`
 - `Strawberry` -> `strawberry`
 
-Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Conky class variants. Brave and ChatGPT do not need `WM_CLIENT_LEADER`: their normal windows can group by normalized class, with same-user process metadata used as supporting/fallback evidence where the runtime permits it.
+Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Conky class variants. The two installed Brave variants intentionally remain separate lifecycle identities. Brave and ChatGPT do not need `WM_CLIENT_LEADER`: their normal windows can group by normalized class, with same-user process metadata used as supporting/fallback evidence where the runtime permits it.
 
 ## Known ambiguities
 
@@ -66,4 +67,3 @@ Live validation on the target desktop has passed for the currently open XFCE Ter
 ## Milestone boundary
 
 There is no event loop, passive key grab, lifecycle action, configuration writer, autostart entry, or service unit. Milestone 3 and later behavior is intentionally absent.
-

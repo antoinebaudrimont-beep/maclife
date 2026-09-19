@@ -53,7 +53,8 @@ fn slug(value: &str) -> String {
 fn apply_alias(value: &str) -> &str {
     match value {
         "chat-gpt" | "chatgpt" => "chatgpt",
-        "brave" | "brave-browser" | "brave-browser-stable" => "brave",
+        "brave" | "brave-browser" | "brave-browser-stable" => "brave-browser",
+        "brave-origin" | "brave-origin-stable" => "brave-origin",
         "org-xfce-thunar" | "thunar" => "thunar",
         "xfce-terminal" | "xfce4-terminal" => "xfce4-terminal",
         "strawberry" => "strawberry",
@@ -148,7 +149,12 @@ fn grouping_rule(anchor: &WindowFacts, candidate: &WindowFacts) -> Option<String
     let candidate_identity = normalized_app_identity(candidate);
     if anchor_identity != "unknown" && anchor_identity == candidate_identity {
         let rule = match anchor_identity.as_str() {
-            "chatgpt" | "brave" | "strawberry" | "xfce4-terminal" | "thunar" => {
+            "chatgpt"
+            | "brave-browser"
+            | "brave-origin"
+            | "strawberry"
+            | "xfce4-terminal"
+            | "thunar" => {
                 "normalized WM_CLASS with reference-app alias"
             }
             _ => "normalized WM_CLASS/process identity",
@@ -219,7 +225,8 @@ mod tests {
     fn normalizes_reference_application_classes() {
         let cases = [
             ("Chatgpt", "chatgpt"),
-            ("Brave-browser", "brave"),
+            ("Brave-browser", "brave-browser"),
+            ("Brave-origin", "brave-origin"),
             ("Xfce4-terminal", "xfce4-terminal"),
             ("Thunar", "thunar"),
             ("Strawberry", "strawberry"),
@@ -237,7 +244,7 @@ mod tests {
             instance: "brave-browser (/tmp/profile)".to_string(),
             class: String::new(),
         });
-        assert_eq!(normalized_app_identity(&window), "brave");
+        assert_eq!(normalized_app_identity(&window), "brave-browser");
     }
 
     #[test]
@@ -271,8 +278,19 @@ mod tests {
         second.pid_validated = true;
 
         let result = inspect(10, vec![first, second]).expect("inspection");
-        assert_eq!(result.app_identity, "brave");
+        assert_eq!(result.app_identity, "brave-browser");
         assert_eq!(result.meaningful_windows.len(), 2);
+    }
+
+    #[test]
+    fn keeps_brave_origin_separate_from_brave_browser() {
+        let origin = WindowFacts::test_window(10, "Brave-origin");
+        let browser = WindowFacts::test_window(20, "Brave-browser");
+
+        let result = inspect(10, vec![origin, browser]).expect("inspection");
+        assert_eq!(result.app_identity, "brave-origin");
+        assert_eq!(result.meaningful_windows.len(), 1);
+        assert_eq!(result.meaningful_windows[0].xid, 10);
     }
 
     #[test]
