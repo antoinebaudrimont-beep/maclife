@@ -143,6 +143,7 @@ fn grouping_rule(anchor: &WindowFacts, candidate: &WindowFacts) -> Option<String
         if left == right {
             return Some(format!("shared WM_CLIENT_LEADER 0x{left:08x}"));
         }
+        return None;
     }
 
     let anchor_identity = normalized_app_identity(anchor);
@@ -289,6 +290,18 @@ mod tests {
 
         let result = inspect(10, vec![origin, browser]).expect("inspection");
         assert_eq!(result.app_identity, "brave-origin");
+        assert_eq!(result.meaningful_windows.len(), 1);
+        assert_eq!(result.meaningful_windows[0].xid, 10);
+    }
+
+    #[test]
+    fn distinct_client_leaders_are_a_hard_group_boundary() {
+        let mut first = WindowFacts::test_window(10, "Xfce4-terminal");
+        first.client_leader = Some(100);
+        let mut second = WindowFacts::test_window(20, "Xfce4-terminal");
+        second.client_leader = Some(200);
+
+        let result = inspect(10, vec![first, second]).expect("inspection");
         assert_eq!(result.meaningful_windows.len(), 1);
         assert_eq!(result.meaningful_windows[0].xid, 10);
     }
