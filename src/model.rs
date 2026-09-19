@@ -30,6 +30,7 @@ pub struct WindowFacts {
     pub states: Vec<String>,
     pub override_redirect: bool,
     pub mapped: bool,
+    pub maclife_hidden: bool,
 }
 
 impl WindowFacts {
@@ -53,6 +54,7 @@ impl WindowFacts {
             states: Vec::new(),
             override_redirect: false,
             mapped: true,
+            maclife_hidden: false,
         }
     }
 }

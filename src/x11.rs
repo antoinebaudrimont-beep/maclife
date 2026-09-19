@@ -21,6 +21,7 @@ struct Atoms {
     WM_CLIENT_MACHINE: Atom,
     NET_WM_WINDOW_TYPE: Atom,
     NET_WM_STATE: Atom,
+    MACLIFE_HIDDEN: Atom,
     type_atoms: Vec<(Atom, &'static str)>,
     state_atoms: Vec<(Atom, &'static str)>,
 }
@@ -89,6 +90,7 @@ impl Atoms {
             WM_CLIENT_MACHINE: existing_atom(conn, "WM_CLIENT_MACHINE")?,
             NET_WM_WINDOW_TYPE: existing_atom(conn, "_NET_WM_WINDOW_TYPE")?,
             NET_WM_STATE: existing_atom(conn, "_NET_WM_STATE")?,
+            MACLIFE_HIDDEN: existing_atom(conn, "_MACLIFE_HIDDEN")?,
             type_atoms,
             state_atoms,
         })
@@ -228,6 +230,11 @@ impl Collector {
             self.property32(xid, self.atoms.NET_WM_STATE),
             &self.atoms.state_atoms,
         );
+        let maclife_hidden = self
+            .property32(xid, self.atoms.MACLIFE_HIDDEN)
+            .into_iter()
+            .next()
+            == Some(1);
 
         Some(WindowFacts {
             xid,
@@ -244,6 +251,7 @@ impl Collector {
             states,
             override_redirect: attributes.override_redirect,
             mapped: attributes.map_state != MapState::UNMAPPED,
+            maclife_hidden,
         })
     }
 

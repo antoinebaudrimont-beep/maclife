@@ -1,9 +1,12 @@
 //! Read-only X11 application identity inspection.
 
+pub mod control;
 pub mod identity;
+pub mod lifecycle;
 pub mod model;
 pub mod process;
 pub mod report;
+pub mod runtime;
 pub mod x11;
 
 use std::error::Error;

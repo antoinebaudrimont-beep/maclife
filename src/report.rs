@@ -78,6 +78,11 @@ fn render_window(output: &mut String, window: &WindowFacts, prefix: &str) {
         "{prefix}Managed flags: mapped={}, override_redirect={}",
         window.mapped, window.override_redirect
     );
+    let _ = writeln!(
+        output,
+        "{prefix}MacLife hidden: {}",
+        window.maclife_hidden
+    );
 }
 
 pub fn render(inspection: &Inspection, verbose: bool) -> String {
