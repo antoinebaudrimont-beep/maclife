@@ -2,7 +2,7 @@
 
 MacLife is an experimental macOS-style application lifecycle project for MX Linux/XFCE on X11.
 
-This repository currently contains **Milestone 2 only**: a small, read-only Rust probe that identifies the focused application and enumerates its meaningful user windows. It does not intercept keys, close windows, hide applications, change desktop settings, or run as a daemon.
+This repository contains **Milestone 3**: the Milestone 2 identity engine plus an event-driven lifecycle process for physical Command+W and Command+Q. The process is started manually; MacLife does not install or modify autostart or service units.
 
 ## Run
 
@@ -15,11 +15,30 @@ Requirements:
 ```sh
 cargo run -- inspect
 cargo run -- inspect --verbose
+cargo run -- run --dry-run --verbose
+cargo run -- run
+cargo run -- restore strawberry
 ```
 
 The normal report includes the focused XID, title, normalized application identity, `WM_CLASS`, PID and validation result, client leader, window type/state, transient relationship, and the count/list of meaningful windows in the same application.
 
 Verbose mode adds one line for every managed client, explaining whether it was meaningful, attached, or excluded and which grouping rule matched it to the focused application.
+
+`run` passively grabs the dedicated X11 keycodes 191 and 192. The Toshy mapping, active configuration path, and backup path are documented in [docs/toshy-control-channel.md](docs/toshy-control-channel.md). Always use `--dry-run` first: it logs the selected action but never closes, hides, quits, or restores a window.
+
+## Lifecycle policy
+
+| Application | Last meaningful window on Command+W | Command+Q |
+|---|---|---|
+| Strawberry | Iconify and mark for explicit restore | MPRIS first; narrowly revalidated same-PID SIGTERM fallback |
+| Brave Origin | Iconify and mark for explicit restore | SIGTERM to the exact validated PID |
+| Brave Browser | Iconify and mark for explicit restore | SIGTERM to the exact validated PID |
+| ChatGPT | Native close | SIGTERM to the exact validated PID |
+| Thunar | Native close | `thunar --quit` |
+| XFCE Terminal | Native close | `WM_DELETE_WINDOW` for each grouped meaningful window |
+| Unknown application | Refuse the last-window action | Refuse |
+
+With more than one meaningful application window, Command+W requests a normal close of the focused window. A focused attached dialog is closed normally and never causes its owner to be hidden. Restore acts only on a window bearing MacLife's private hidden marker and refuses ambiguous matches.
 
 ## Identity strategy
 
@@ -30,7 +49,7 @@ The implementation deliberately does not treat a PID as an application. It uses 
 3. Resolve a focused `WM_TRANSIENT_FOR` chain back to its owner.
 4. Exclude override-redirect windows, desktop components, panels, Conky, docks, menus, tooltips, dropdowns, notifications, and other non-normal types.
 5. Treat dialogs/transients as attached to their owner, not as independently countable windows.
-6. Group normal windows by exact `WM_CLIENT_LEADER` when both sides provide it, then normalized `WM_CLASS`/process identity, then an exact same-user validated `_NET_WM_PID` fallback.
+6. Group normal windows by exact `WM_CLIENT_LEADER` when both sides provide it. Two different nonzero leaders are a hard boundary; class fallback must not merge them. Otherwise use normalized `WM_CLASS`/process identity, then an exact same-user validated `_NET_WM_PID` fallback.
 7. Validate `_NET_WM_PID` against a local `WM_CLIENT_MACHINE`, a readable `/proc/<pid>`, and the current user's UID before using it as PID evidence.
 
 All X11 atom lookups use `only_if_exists`, so inspection does not even create server atoms. The X11 connection issues property/attribute reads only.
@@ -60,10 +79,10 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 
 ## Verification status
 
-Automated tests cover pure normalization, filtering, transient ownership, multi-window class grouping, and validated-PID fallback. They do not pretend to emulate an X server.
+Automated tests cover normalization, filtering, transient ownership, multi-window class grouping, distinct-leader boundaries, lifecycle policy, hidden-window bookkeeping, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
 
-Live validation on the target desktop has passed for the currently open XFCE Terminal and ChatGPT windows, including ChatGPT's missing leader and its profile-bearing instance string. The other reference applications require the manual live matrix in [docs/live-test-checklist.md](docs/live-test-checklist.md) when their real windows are open.
+Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md). Milestone 3's remaining interactive validation is listed in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md).
 
 ## Milestone boundary
 
-There is no event loop, passive key grab, lifecycle action, configuration writer, autostart entry, or service unit. Milestone 3 and later behavior is intentionally absent.
+Milestone 3 is X11/XFCE-only. It does not implement Command+H or Command+M, title-bar close interception, xfwm4 patches, session restoration, autostart/service installation, or Wayland support.
