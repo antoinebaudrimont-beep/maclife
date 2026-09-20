@@ -2,9 +2,48 @@
 
 MacLife is an experimental macOS-style application lifecycle project for MX Linux/XFCE on X11.
 
-This repository contains **Milestone 4**: a generic X11 application-lifecycle layer built on the Milestone 2 identity engine and Milestone 3 physical Command+W/Command+Q input path. The process is started manually; MacLife does not install or modify autostart or service units.
+This repository contains **Milestone 5**: a reliable XFCE/X11 user-session daemon around the generic Milestone 4 lifecycle layer. MacLife installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
 
-## Run
+## Install for the current user
+
+From the repository:
+
+```sh
+./scripts/install-user.sh
+```
+
+The installer builds an optimized binary, then installs only user-owned files:
+
+- `~/.local/bin/maclife`
+- `~/.local/libexec/maclife-session-start`
+- `~/.config/systemd/user/maclife.service`
+- `~/.config/autostart/maclife.desktop`
+
+If a destination already contains different content, the installer first creates a timestamped backup next to it. It starts MacLife immediately when invoked from an active X11 session; use `./scripts/install-user.sh --no-start` to defer startup until the next XFCE login. No root access is used.
+
+The XFCE autostart entry runs a small session bridge. It verifies X11, imports the live `DISPLAY`, `XAUTHORITY`, desktop, and D-Bus variables into the systemd user manager, clears any previous rate-limit failure, and starts `maclife.service`. There is no startup sleep. MacLife does not depend on Toshy's service: it can start before Toshy's virtual keyboard appears and dynamically refreshes XInput devices when Toshy starts or restarts.
+
+Daily status and logs:
+
+```sh
+systemctl --user status maclife.service
+journalctl --user -u maclife.service -n 50 --no-pager
+systemctl --user restart maclife.service
+systemctl --user stop maclife.service
+systemctl --user start maclife.service
+```
+
+The installed XFCE autostart entry is the automatic-start enablement mechanism on this machine. Its `graphical-session.target` is not active, so the unit is intentionally static rather than enabled against an unreliable target. The installer creates the autostart entry and starts the service; the uninstaller stops the service and removes that entry. Direct `start` works after the session bridge has imported the current X11 environment.
+
+To replace the installed binary and support files after an update, rerun the installer. To remove the installed service, autostart entry, helper, and binary:
+
+```sh
+./scripts/uninstall-user.sh
+```
+
+The uninstaller leaves timestamped backups in place.
+
+## Development and diagnostics
 
 Requirements:
 
@@ -25,7 +64,17 @@ The normal report includes the focused XID, title, normalized application identi
 
 Verbose mode adds one line for every managed client, explaining whether it was meaningful, attached, or excluded and which grouping rule matched it to the focused application.
 
-`run` passively grabs the dedicated X11 keycodes 191 and 192. The Toshy mapping, active configuration path, and backup path are documented in [docs/toshy-control-channel.md](docs/toshy-control-channel.md). Always use `--dry-run` first: it logs the selected action but never closes, hides, quits, or restores a window.
+`run` passively grabs the dedicated X11 keycodes 191 and 192. The Toshy mapping, active configuration path, and backup path are documented in [docs/toshy-control-channel.md](docs/toshy-control-channel.md). The installed service runs the equivalent of `maclife run`; manual `cargo run -- run` is only for development and will refuse while the service owns the singleton lock. Always use `--dry-run` first during development: it logs the selected action but never closes, hides, quits, or restores a window.
+
+## Daemon reliability model
+
+MacLife keeps an exclusive kernel lock at `$XDG_RUNTIME_DIR/maclife/daemon.lock`. The file may remain after a crash, but the lock cannot: a stale unlocked file is safely reused, while a second live process refuses to start. The runtime directory, private subdirectory, and lock file are ownership/permission checked, and the lock file is opened without following symlinks.
+
+SIGTERM and SIGINT wake the event loop through a nonblocking signal pipe. MacLife then logs shutdown and releases its X11 grabs, connection, and singleton through normal resource cleanup. The same poll waits for X11 and shutdown events, so idle operation has no timer or busy loop. Loss of the X connection is a failure; the daemon exits and lets systemd apply its bounded restart policy (`2s`, at most five starts in 30 seconds) rather than reconnecting forever.
+
+On startup, MacLife scans the current X session for its private hidden marker. It adopts only windows that are still hidden, meaningful, and have stable class or validated local-process identity evidence. Visible or invalid marked windows have the stale marker cleared. Adopted windows remain available to `maclife restore <identity>`, but the in-memory logical-active application is intentionally reset: a daemon restart must not invent user intent.
+
+Normal service logs contain startup, shutdown, lifecycle actions, refusals, and errors. Per-window identity reasoning remains restricted to `--verbose` diagnostics.
 
 ## Lifecycle policy
 
@@ -100,8 +149,8 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 
 Automated tests cover generic eligibility, one/two-window policy, transient ownership, marker-only generic restore selection, safe and ambiguous generic process quit, process-metadata revalidation, desktop filtering, terminal/native exceptions, all reference applications, logical-active state transitions, XInput device classification, the physical lifecycle-chord state machine, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
 
-Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md), Milestone 3 input/lifecycle validation in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md), and Milestone 4 generic-policy validation in [docs/milestone-4-live-test-checklist.md](docs/milestone-4-live-test-checklist.md).
+Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md), Milestone 3 input/lifecycle validation in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md), Milestone 4 generic-policy validation in [docs/milestone-4-live-test-checklist.md](docs/milestone-4-live-test-checklist.md), and Milestone 5 service validation in [docs/milestone-5-live-test-checklist.md](docs/milestone-5-live-test-checklist.md).
 
 ## Milestone boundary
 
-Milestone 4 is X11/XFCE-only and intentionally conservative; it does not claim universal Linux application compatibility. It does not implement Command+H or Command+M, title-bar close interception, xfwm4 patches, session restoration across MacLife restarts, autostart/service installation, GUI configuration, or Wayland support.
+Milestone 5 is X11/XFCE-only and intentionally conservative; it does not claim universal Linux application compatibility. It does not implement Command+H or Command+M, title-bar close interception, xfwm4 patches, restoration across logout/login or a new X server, GUI configuration, or Wayland support. Same-session daemon restart adoption is deliberately narrower than persistent session restoration.

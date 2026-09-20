@@ -3,7 +3,7 @@ name = "maclife"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Read-only X11 application and window identity probe"
+description = "Mac-style X11 application lifecycle daemon"
 license = "MIT"
 
 [dependencies]
