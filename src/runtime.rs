@@ -2,7 +2,8 @@ use crate::control;
 use crate::identity::{self, normalized_app_identity};
 use crate::input::{IntentDevices, KeyPhase, LifecycleChordTracker};
 use crate::lifecycle::{
-    self, ActiveTarget, CloseDecision, FocusKind, HiddenWindows, QuitMethod,
+    self, ActiveTarget, ApplicationPolicy, CloseDecision, FocusKind, HiddenWindows, PolicyKind,
+    QuitMethod,
 };
 use crate::model::{Disposition, Inspection, Snapshot, WindowFacts};
 use crate::{process, report, x11, DynError};
@@ -49,6 +50,12 @@ fn focus_kind(inspection: &Inspection) -> FocusKind {
         Disposition::Attached(_) => FocusKind::Attached,
         Disposition::Excluded(_) => FocusKind::Excluded,
     }
+}
+
+fn policy_for(inspection: &Inspection) -> (ApplicationPolicy, Option<String>) {
+    let eligibility = identity::generic_lifecycle_eligibility(inspection);
+    let policy = lifecycle::application_policy(&inspection.app_identity, eligibility.is_ok());
+    (policy, eligibility.err())
 }
 
 fn action_name(decision: &CloseDecision) -> &'static str {
@@ -220,15 +227,17 @@ fn handle_close(
     }
     let (snapshot, inspection) = focused_inspection()?;
     reconcile_hidden(hidden, &snapshot);
+    let (policy, ineligible_reason) = policy_for(&inspection);
     let decision = lifecycle::close_decision(
-        &inspection.app_identity,
+        policy,
         inspection.meaningful_windows.len(),
         focus_kind(&inspection),
     );
     println!(
-        "Cmd+W focused={} meaningful_windows={} action={} xid=0x{:08x}",
+        "Cmd+W focused={} meaningful_windows={} policy={} action={} xid=0x{:08x}",
         inspection.app_identity,
         inspection.meaningful_windows.len(),
+        policy.kind.name(),
         action_name(&decision),
         inspection.focused_xid
     );
@@ -267,7 +276,7 @@ fn handle_close(
             hidden.remember_as_logical(inspection.focused_xid, inspection.app_identity);
             Ok(())
         }
-        CloseDecision::Refuse(reason) => Err(reason.into()),
+        CloseDecision::Refuse(reason) => Err(ineligible_reason.unwrap_or(reason).into()),
     }
 }
 
@@ -308,9 +317,53 @@ fn validated_pid(window: &WindowFacts, expected_identity: &str) -> Result<u32, D
     Ok(pid)
 }
 
-fn terminate_validated_pid(inspection: &Inspection) -> Result<(), DynError> {
-    let pid = validated_pid(&inspection.identity_window, &inspection.app_identity)?;
-    command_status("/bin/kill", &["-TERM", &pid.to_string()])
+fn generic_process_pid(inspection: &Inspection) -> Result<u32, DynError> {
+    identity::generic_lifecycle_eligibility(inspection)
+        .map_err(|reason| format!("refusing generic quit: {reason}"))?;
+    let expected_identity = &inspection.app_identity;
+    let pid = validated_pid(&inspection.identity_window, expected_identity)?;
+    let process = inspection
+        .identity_window
+        .process
+        .as_ref()
+        .ok_or("refusing generic quit: process metadata is missing")?;
+    let process_identity = identity::normalized_process_identity(process);
+    if process_identity != *expected_identity {
+        return Err(format!(
+            "refusing generic quit: window identity {expected_identity} does not match process identity {process_identity}"
+        )
+        .into());
+    }
+    if process
+        .command_line
+        .as_deref()
+        .is_some_and(|command| command.split_whitespace().any(|part| part.starts_with("--type=")))
+        || process.name.to_ascii_lowercase().contains("helper")
+    {
+        return Err(
+            "refusing generic quit: window PID appears to be a helper process".into(),
+        );
+    }
+
+    for window in &inspection.meaningful_windows {
+        let window_pid = validated_pid(window, expected_identity)?;
+        if window_pid != pid {
+            return Err(format!(
+                "refusing generic quit: meaningful windows expose multiple validated PIDs ({pid} and {window_pid})"
+            )
+            .into());
+        }
+        let window_process = window
+            .process
+            .as_ref()
+            .ok_or("refusing generic quit: meaningful window process metadata is missing")?;
+        if identity::normalized_process_identity(window_process) != *expected_identity {
+            return Err(
+                "refusing generic quit: a meaningful window has ambiguous process identity".into(),
+            );
+        }
+    }
+    Ok(pid)
 }
 
 fn revalidate_same_process(
@@ -319,13 +372,13 @@ fn revalidate_same_process(
     expected_identity: &str,
 ) -> Result<u32, DynError> {
     if current.xid != original.xid {
-        return Err("refusing SIGTERM fallback: X11 window identity changed".into());
+        return Err("refusing SIGTERM: X11 window identity changed".into());
     }
     let original_pid = validated_pid(original, expected_identity)?;
     let current_pid = validated_pid(current, expected_identity)?;
     if current_pid != original_pid {
         return Err(format!(
-            "refusing SIGTERM fallback: PID changed from {original_pid} to {current_pid}"
+            "refusing SIGTERM: PID changed from {original_pid} to {current_pid}"
         )
         .into());
     }
@@ -339,18 +392,55 @@ fn revalidate_same_process(
         .as_ref()
         .ok_or("current process metadata disappeared")?;
     if current_process.uid != original_process.uid
+        || current_process.parent_pid != original_process.parent_pid
         || current_process.name != original_process.name
         || current_process.executable != original_process.executable
+        || current_process.command_line != original_process.command_line
     {
-        return Err("refusing SIGTERM fallback: process identity changed".into());
+        return Err("refusing SIGTERM: process identity changed".into());
     }
     Ok(original_pid)
+}
+
+fn terminate_revalidated_pid(
+    inspection: &Inspection,
+    require_generic_association: bool,
+) -> Result<(), DynError> {
+    let initial_pid = if require_generic_association {
+        generic_process_pid(inspection)?
+    } else {
+        validated_pid(&inspection.identity_window, &inspection.app_identity)?
+    };
+
+    let snapshot = x11::collect_snapshot()?;
+    let current = identity::inspect(inspection.identity_window.xid, snapshot.windows)?;
+    if current.app_identity != inspection.app_identity {
+        return Err(format!(
+            "refusing SIGTERM: application identity changed from {} to {}",
+            inspection.app_identity, current.app_identity
+        )
+        .into());
+    }
+    let revalidated_pid = revalidate_same_process(
+        &inspection.identity_window,
+        &current.identity_window,
+        &inspection.app_identity,
+    )?;
+    if revalidated_pid != initial_pid {
+        return Err("refusing SIGTERM: process association changed during validation".into());
+    }
+    if require_generic_association && generic_process_pid(&current)? != initial_pid {
+        return Err("refusing generic quit: application process association changed".into());
+    }
+
+    command_status("/bin/kill", &["-TERM", &initial_pid.to_string()])
 }
 
 fn quit_method_name(method: QuitMethod) -> &'static str {
     match method {
         QuitMethod::StrawberryMpris => "mpris-then-validated-pid-sigterm",
         QuitMethod::ThunarCli => "thunar--quit",
+        QuitMethod::GenericValidatedPidTerm => "validated-generic-pid-sigterm",
         QuitMethod::ValidatedPidTerm => "validated-pid-sigterm",
         QuitMethod::CloseEachWindow => "wm-delete-each-window",
         QuitMethod::Unsupported => "unsupported",
@@ -446,15 +536,6 @@ fn validate_logical_inspection(
         )
         .into());
     }
-    if matches!(
-        lifecycle::application_rule(expected_identity).quit,
-        QuitMethod::StrawberryMpris | QuitMethod::ValidatedPidTerm
-    ) {
-        if let Err(error) = validated_pid(&inspection.identity_window, expected_identity) {
-            hidden.forget(xid);
-            return Err(error);
-        }
-    }
     Ok(inspection)
 }
 
@@ -487,11 +568,37 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
         confirm_current_interaction(hidden, "button", true, options.verbose)?;
     }
     let (inspection, source) = resolve_quit_target(hidden)?;
-    let method = lifecycle::application_rule(&inspection.app_identity).quit;
+    let (policy, ineligible_reason) = policy_for(&inspection);
+    let method = policy.quit;
+    if policy.kind == PolicyKind::Refuse {
+        let reason = ineligible_reason
+            .unwrap_or_else(|| "application is not eligible for generic lifecycle control".into());
+        println!(
+            "Cmd+Q target={} source={} policy={} result=refused reason={}",
+            inspection.app_identity,
+            source.name(),
+            policy.kind.name(),
+            reason
+        );
+        return Err(reason.into());
+    }
+    if method == QuitMethod::GenericValidatedPidTerm {
+        if let Err(error) = generic_process_pid(&inspection) {
+            println!(
+                "Cmd+Q target={} source={} policy={} result=refused reason={}",
+                inspection.app_identity,
+                source.name(),
+                policy.kind.name(),
+                error
+            );
+            return Err(error);
+        }
+    }
     println!(
-        "Cmd+Q target={} source={} action=application-quit method={}",
+        "Cmd+Q target={} source={} policy={} action=application-quit method={}",
         inspection.app_identity,
         source.name(),
+        policy.kind.name(),
         quit_method_name(method)
     );
     if options.verbose {
@@ -504,7 +611,8 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
     let result = match method {
         QuitMethod::StrawberryMpris => quit_strawberry(&inspection),
         QuitMethod::ThunarCli => command_status("thunar", &["--quit"]),
-        QuitMethod::ValidatedPidTerm => terminate_validated_pid(&inspection),
+        QuitMethod::GenericValidatedPidTerm => terminate_revalidated_pid(&inspection, true),
+        QuitMethod::ValidatedPidTerm => terminate_revalidated_pid(&inspection, false),
         QuitMethod::CloseEachWindow => {
             for window in &inspection.meaningful_windows {
                 control::request_close(window.xid)?;
@@ -657,31 +765,34 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
     }
 }
 
+fn select_restore_candidate(windows: &[WindowFacts], wanted: &str) -> Result<u32, String> {
+    let matches: Vec<_> = windows
+        .iter()
+        .filter(|window| {
+            window.maclife_hidden
+                && identity::disposition(window) == Disposition::Meaningful
+                && normalized_app_identity(window) == wanted
+        })
+        .map(|window| window.xid)
+        .collect();
+    match matches.as_slice() {
+        [] => Err(format!("no MacLife-hidden window for {wanted}")),
+        [xid] => Ok(*xid),
+        _ => Err(format!(
+            "multiple MacLife-hidden windows for {wanted}; refusing ambiguous restore"
+        )),
+    }
+}
+
 pub fn restore(identity: &str) -> Result<(), DynError> {
     let wanted = identity.trim().to_ascii_lowercase();
     let snapshot = x11::collect_snapshot()?;
-    let matches: Vec<_> = snapshot
-        .windows
-        .iter()
-        .filter(|window| {
-            window.maclife_hidden && normalized_app_identity(window) == wanted
-        })
-        .collect();
-    let window = match matches.as_slice() {
-        [] => return Err(format!("no MacLife-hidden window for {wanted}").into()),
-        [window] => *window,
-        _ => {
-            return Err(format!(
-                "multiple MacLife-hidden windows for {wanted}; refusing ambiguous restore"
-            )
-            .into())
-        }
-    };
+    let xid = select_restore_candidate(&snapshot.windows, &wanted)?;
 
-    control::activate_window(window.xid)?;
+    control::activate_window(xid)?;
     thread::sleep(Duration::from_millis(500));
     let after = x11::collect_snapshot()?;
-    let restored = after.windows.iter().find(|candidate| candidate.xid == window.xid);
+    let restored = after.windows.iter().find(|candidate| candidate.xid == xid);
     let is_visible = restored.is_some_and(|candidate| {
         candidate.mapped
             && !candidate
@@ -692,22 +803,23 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
     if !is_visible {
         return Err(format!(
             "xfwm4 did not confirm restoration of 0x{:08x}; marker retained",
-            window.xid
+            xid
         )
         .into());
     }
-    control::clear_hidden_marker(window.xid)?;
-    println!("restored={} xid=0x{:08x}", wanted, window.xid);
+    control::clear_hidden_marker(xid)?;
+    println!("restored={} xid=0x{:08x}", wanted, xid);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::revalidate_same_process;
+    use super::{generic_process_pid, revalidate_same_process, select_restore_candidate};
+    use crate::identity;
     use crate::model::{ProcessInfo, WindowFacts};
 
-    fn strawberry_window(xid: u32, pid: u32) -> WindowFacts {
-        let mut window = WindowFacts::test_window(xid, "Strawberry");
+    fn process_window(xid: u32, class: &str, pid: u32, executable: &str) -> WindowFacts {
+        let mut window = WindowFacts::test_window(xid, class);
         window.pid = Some(pid);
         window.pid_validated = true;
         window.pid_validation = format!("same-user local /proc/{pid}");
@@ -715,11 +827,15 @@ mod tests {
             pid,
             uid: 1000,
             parent_pid: Some(1),
-            name: "strawberry".to_string(),
-            executable: Some("/usr/bin/strawberry".to_string()),
-            command_line: Some("strawberry".to_string()),
+            name: executable.to_string(),
+            executable: Some(format!("/usr/bin/{executable}")),
+            command_line: Some(executable.to_string()),
         });
         window
+    }
+
+    fn strawberry_window(xid: u32, pid: u32) -> WindowFacts {
+        process_window(xid, "Strawberry", pid, "strawberry")
     }
 
     #[test]
@@ -744,7 +860,63 @@ mod tests {
         changed_pid.pid_validation = "process unavailable".to_string();
         assert!(revalidate_same_process(&original, &changed_pid, "strawberry").is_err());
 
+        let mut changed_metadata = original.clone();
+        changed_metadata.process.as_mut().expect("process").command_line =
+            Some("strawberry --changed".to_string());
+        assert!(revalidate_same_process(&original, &changed_metadata, "strawberry").is_err());
+
         let changed_identity = WindowFacts::test_window(10, "Other");
         assert!(revalidate_same_process(&original, &changed_identity, "strawberry").is_err());
+    }
+
+    #[test]
+    fn generic_quit_accepts_one_stable_application_process() {
+        let window = process_window(10, "FeatherPad", 1234, "featherpad");
+        let inspection = identity::inspect(10, vec![window]).expect("inspection");
+        assert_eq!(generic_process_pid(&inspection).expect("safe PID"), 1234);
+    }
+
+    #[test]
+    fn generic_quit_rejects_invalidated_or_mismatched_process_identity() {
+        let mut invalid = process_window(10, "FeatherPad", 1234, "featherpad");
+        invalid.pid_validated = false;
+        invalid.pid_validation = "process unavailable".to_string();
+        let inspection = identity::inspect(10, vec![invalid]).expect("inspection");
+        assert!(generic_process_pid(&inspection).is_err());
+
+        let mismatched = process_window(10, "FeatherPad", 1234, "unrelated-helper");
+        let inspection = identity::inspect(10, vec![mismatched]).expect("inspection");
+        assert!(generic_process_pid(&inspection).is_err());
+
+        let mut helper = process_window(10, "FeatherPad", 1234, "featherpad");
+        helper.process.as_mut().expect("process").command_line =
+            Some("featherpad --type=renderer".to_string());
+        let inspection = identity::inspect(10, vec![helper]).expect("inspection");
+        assert!(generic_process_pid(&inspection).is_err());
+    }
+
+    #[test]
+    fn generic_quit_rejects_multiple_window_pids() {
+        let first = process_window(10, "FeatherPad", 1234, "featherpad");
+        let second = process_window(20, "FeatherPad", 5678, "featherpad");
+        let inspection = identity::inspect(10, vec![first, second]).expect("inspection");
+        assert!(generic_process_pid(&inspection).is_err());
+    }
+
+    #[test]
+    fn generic_restore_requires_marker_and_refuses_ambiguity() {
+        let mut hidden = WindowFacts::test_window(10, "FeatherPad");
+        hidden.maclife_hidden = true;
+        assert_eq!(
+            select_restore_candidate(&[hidden.clone()], "featherpad").expect("candidate"),
+            10
+        );
+
+        let visible = WindowFacts::test_window(20, "FeatherPad");
+        assert!(select_restore_candidate(&[visible], "featherpad").is_err());
+
+        let mut second = hidden.clone();
+        second.xid = 30;
+        assert!(select_restore_candidate(&[hidden, second], "featherpad").is_err());
     }
 }

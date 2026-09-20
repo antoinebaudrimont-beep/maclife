@@ -11,40 +11,77 @@ pub enum LastWindowAction {
 pub enum QuitMethod {
     StrawberryMpris,
     ThunarCli,
+    GenericValidatedPidTerm,
     ValidatedPidTerm,
     CloseEachWindow,
     Unsupported,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ApplicationRule {
+pub enum PolicyKind {
+    Generic,
+    DedicatedAdapter,
+    NativeLifecycle,
+    TerminalSafety,
+    Refuse,
+}
+
+impl PolicyKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::DedicatedAdapter => "dedicated-adapter",
+            Self::NativeLifecycle => "native-lifecycle",
+            Self::TerminalSafety => "terminal-safety",
+            Self::Refuse => "refuse",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplicationPolicy {
+    pub kind: PolicyKind,
     pub last_window: LastWindowAction,
     pub quit: QuitMethod,
 }
 
-pub fn application_rule(identity: &str) -> ApplicationRule {
+pub fn application_policy(identity: &str, generic_eligible: bool) -> ApplicationPolicy {
     match identity {
-        "strawberry" => ApplicationRule {
+        "strawberry" => ApplicationPolicy {
+            kind: PolicyKind::DedicatedAdapter,
             last_window: LastWindowAction::Hide,
             quit: QuitMethod::StrawberryMpris,
         },
-        "brave-origin" | "brave-browser" => ApplicationRule {
-            last_window: LastWindowAction::Hide,
-            quit: QuitMethod::ValidatedPidTerm,
-        },
-        "chatgpt" => ApplicationRule {
-            last_window: LastWindowAction::NativeClose,
-            quit: QuitMethod::ValidatedPidTerm,
-        },
-        "thunar" => ApplicationRule {
+        "thunar" => ApplicationPolicy {
+            kind: PolicyKind::DedicatedAdapter,
             last_window: LastWindowAction::Hide,
             quit: QuitMethod::ThunarCli,
         },
-        "xfce4-terminal" => ApplicationRule {
+        "chatgpt" => ApplicationPolicy {
+            kind: PolicyKind::NativeLifecycle,
+            last_window: LastWindowAction::NativeClose,
+            quit: QuitMethod::ValidatedPidTerm,
+        },
+        "xfce4-terminal" => ApplicationPolicy {
+            kind: PolicyKind::TerminalSafety,
             last_window: LastWindowAction::NativeClose,
             quit: QuitMethod::CloseEachWindow,
         },
-        _ => ApplicationRule {
+        // Chromium exposes its browser process through the top-level window's
+        // validated PID. Keep this proven association as a narrow exception;
+        // never infer it for arbitrary multi-process applications.
+        "brave-origin" | "brave-browser" => ApplicationPolicy {
+            kind: PolicyKind::Generic,
+            last_window: LastWindowAction::Hide,
+            quit: QuitMethod::ValidatedPidTerm,
+        },
+        _ if generic_eligible => ApplicationPolicy {
+            kind: PolicyKind::Generic,
+            last_window: LastWindowAction::Hide,
+            quit: QuitMethod::GenericValidatedPidTerm,
+        },
+        _ => ApplicationPolicy {
+            kind: PolicyKind::Refuse,
             last_window: LastWindowAction::Refuse,
             quit: QuitMethod::Unsupported,
         },
@@ -66,7 +103,11 @@ pub enum CloseDecision {
     Refuse(String),
 }
 
-pub fn close_decision(identity: &str, meaningful_count: usize, focus: FocusKind) -> CloseDecision {
+pub fn close_decision(
+    policy: ApplicationPolicy,
+    meaningful_count: usize,
+    focus: FocusKind,
+) -> CloseDecision {
     if focus == FocusKind::Excluded {
         return CloseDecision::Refuse("focused window is excluded from lifecycle control".into());
     }
@@ -80,12 +121,12 @@ pub fn close_decision(identity: &str, meaningful_count: usize, focus: FocusKind)
         return CloseDecision::CloseFocused;
     }
 
-    match application_rule(identity).last_window {
+    match policy.last_window {
         LastWindowAction::Hide => CloseDecision::HideLast,
         LastWindowAction::NativeClose => CloseDecision::NativeCloseLast,
-        LastWindowAction::Refuse => CloseDecision::Refuse(format!(
-            "no proven last-window rule for {identity}"
-        )),
+        LastWindowAction::Refuse => CloseDecision::Refuse(
+            "application is not eligible for generic lifecycle control".to_string(),
+        ),
     }
 }
 
@@ -211,9 +252,13 @@ mod tests {
     use crate::input::{KeyPhase, LifecycleChordTracker};
 
     use super::{
-        application_rule, close_decision, select_active_target, ActiveTarget, CloseDecision,
-        FocusKind, HiddenWindows, LastWindowAction, QuitMethod,
+        application_policy, close_decision, select_active_target, ActiveTarget, ApplicationPolicy,
+        CloseDecision, FocusKind, HiddenWindows, LastWindowAction, PolicyKind, QuitMethod,
     };
+
+    fn eligible_policy(identity: &str) -> ApplicationPolicy {
+        application_policy(identity, true)
+    }
 
     fn observe_key(
         hidden: &mut HiddenWindows,
@@ -244,7 +289,7 @@ mod tests {
     #[test]
     fn closes_only_the_focused_window_when_multiple_exist() {
         assert_eq!(
-            close_decision("brave-origin", 2, FocusKind::Meaningful),
+            close_decision(eligible_policy("brave-origin"), 2, FocusKind::Meaningful),
             CloseDecision::CloseFocused
         );
     }
@@ -252,15 +297,15 @@ mod tests {
     #[test]
     fn hides_known_destructive_last_windows() {
         assert_eq!(
-            close_decision("strawberry", 1, FocusKind::Meaningful),
+            close_decision(eligible_policy("strawberry"), 1, FocusKind::Meaningful),
             CloseDecision::HideLast
         );
         assert_eq!(
-            close_decision("brave-origin", 1, FocusKind::Meaningful),
+            close_decision(eligible_policy("brave-origin"), 1, FocusKind::Meaningful),
             CloseDecision::HideLast
         );
         assert_eq!(
-            close_decision("thunar", 1, FocusKind::Meaningful),
+            close_decision(eligible_policy("thunar"), 1, FocusKind::Meaningful),
             CloseDecision::HideLast
         );
     }
@@ -268,7 +313,7 @@ mod tests {
     #[test]
     fn preserves_native_close_for_cooperative_apps() {
         assert_eq!(
-            close_decision("chatgpt", 1, FocusKind::Meaningful),
+            close_decision(eligible_policy("chatgpt"), 1, FocusKind::Meaningful),
             CloseDecision::NativeCloseLast
         );
     }
@@ -276,11 +321,11 @@ mod tests {
     #[test]
     fn thunar_closes_one_of_two_windows_but_hides_the_last() {
         assert_eq!(
-            close_decision("thunar", 2, FocusKind::Meaningful),
+            close_decision(eligible_policy("thunar"), 2, FocusKind::Meaningful),
             CloseDecision::CloseFocused
         );
         assert_eq!(
-            close_decision("thunar", 1, FocusKind::Meaningful),
+            close_decision(eligible_policy("thunar"), 1, FocusKind::Meaningful),
             CloseDecision::HideLast
         );
     }
@@ -288,30 +333,66 @@ mod tests {
     #[test]
     fn closes_attached_dialog_without_hiding_owner() {
         assert_eq!(
-            close_decision("strawberry", 1, FocusKind::Attached),
+            close_decision(eligible_policy("strawberry"), 1, FocusKind::Attached),
             CloseDecision::CloseFocused
         );
     }
 
     #[test]
-    fn unknown_last_window_fails_safely() {
+    fn valid_unknown_by_name_application_uses_generic_policy() {
+        let policy = application_policy("featherpad", true);
+        assert_eq!(
+            close_decision(policy, 1, FocusKind::Meaningful),
+            CloseDecision::HideLast
+        );
+        assert_eq!(policy.kind, PolicyKind::Generic);
+        assert_eq!(policy.quit, QuitMethod::GenericValidatedPidTerm);
+    }
+
+    #[test]
+    fn ambiguous_application_refuses_generic_policy() {
+        let policy = application_policy("unknown", false);
         assert!(matches!(
-            close_decision("unknown-editor", 1, FocusKind::Meaningful),
+            close_decision(policy, 1, FocusKind::Meaningful),
             CloseDecision::Refuse(_)
         ));
-        assert_eq!(
-            application_rule("unknown-editor").quit,
-            QuitMethod::Unsupported
-        );
+        assert_eq!(policy.kind, PolicyKind::Refuse);
+        assert_eq!(policy.quit, QuitMethod::Unsupported);
     }
 
     #[test]
     fn brave_variants_have_separate_rules() {
-        let origin = application_rule("brave-origin");
-        let browser = application_rule("brave-browser");
+        let origin = application_policy("brave-origin", true);
+        let browser = application_policy("brave-browser", true);
         assert_eq!(origin.last_window, LastWindowAction::Hide);
         assert_eq!(browser.last_window, LastWindowAction::Hide);
         assert_ne!("brave-origin", "brave-browser");
+    }
+
+    #[test]
+    fn generic_two_window_and_attached_dialog_decisions_stay_window_scoped() {
+        let policy = application_policy("featherpad", true);
+        assert_eq!(
+            close_decision(policy, 2, FocusKind::Meaningful),
+            CloseDecision::CloseFocused
+        );
+        assert_eq!(
+            close_decision(policy, 1, FocusKind::Attached),
+            CloseDecision::CloseFocused
+        );
+    }
+
+    #[test]
+    fn terminal_and_native_lifecycle_exceptions_remain_narrow() {
+        let terminal = application_policy("xfce4-terminal", true);
+        assert_eq!(terminal.kind, PolicyKind::TerminalSafety);
+        assert_eq!(terminal.last_window, LastWindowAction::NativeClose);
+        assert_eq!(terminal.quit, QuitMethod::CloseEachWindow);
+
+        let chatgpt = application_policy("chatgpt", true);
+        assert_eq!(chatgpt.kind, PolicyKind::NativeLifecycle);
+        assert_eq!(chatgpt.last_window, LastWindowAction::NativeClose);
+        assert_eq!(chatgpt.quit, QuitMethod::ValidatedPidTerm);
     }
 
     #[test]

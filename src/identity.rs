@@ -1,4 +1,4 @@
-use crate::model::{Disposition, Inspection, WindowDecision, WindowFacts};
+use crate::model::{Disposition, Inspection, ProcessInfo, WindowDecision, WindowFacts};
 use crate::DynError;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -68,16 +68,50 @@ pub fn normalized_app_identity(window: &WindowFacts) -> String {
             .then_some(class.class.as_str())
             .or_else(|| (!class.instance.trim().is_empty()).then_some(class.instance.as_str()))
     });
-    let process_value = window.process.as_ref().and_then(|process| {
-        process
-            .executable
-            .as_deref()
-            .and_then(|value| Path::new(value).file_name())
-            .and_then(|value| value.to_str())
-            .or_else(|| (!process.name.is_empty()).then_some(process.name.as_str()))
-    });
-    let normalized = slug(class_value.or(process_value).unwrap_or("unknown"));
+    let process_value = window.process.as_ref().map(normalized_process_identity);
+    let normalized = class_value
+        .map(slug)
+        .or(process_value)
+        .unwrap_or_else(|| "unknown".to_string());
     apply_alias(&normalized).to_string()
+}
+
+pub fn normalized_process_identity(process: &ProcessInfo) -> String {
+    let value = process
+        .executable
+        .as_deref()
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .or_else(|| (!process.name.is_empty()).then_some(process.name.as_str()))
+        .unwrap_or("unknown");
+    apply_alias(&slug(value)).to_string()
+}
+
+pub fn generic_lifecycle_eligibility(inspection: &Inspection) -> Result<(), String> {
+    if inspection.app_identity == "unknown" || inspection.app_identity.is_empty() {
+        return Err("application identity is missing or unstable".to_string());
+    }
+    if disposition(&inspection.identity_window) != Disposition::Meaningful {
+        return Err("identity window is not a meaningful normal window".to_string());
+    }
+    if inspection.meaningful_windows.is_empty() {
+        return Err("application has no meaningful normal windows".to_string());
+    }
+
+    let has_class_identity = inspection
+        .identity_window
+        .wm_class
+        .as_ref()
+        .is_some_and(|class| {
+            !class.class.trim().is_empty() || !class.instance.trim().is_empty()
+        });
+    let has_validated_process_identity = inspection.identity_window.pid_validated
+        && inspection.identity_window.process.is_some();
+    if !has_class_identity && !has_validated_process_identity {
+        return Err("identity lacks WM_CLASS and validated process evidence".to_string());
+    }
+
+    Ok(())
 }
 
 pub fn disposition(window: &WindowFacts) -> Disposition {
@@ -219,8 +253,11 @@ pub fn inspect(active_xid: u32, windows: Vec<WindowFacts>) -> Result<Inspection,
 
 #[cfg(test)]
 mod tests {
-    use super::{disposition, inspect, normalized_app_identity};
-    use crate::model::{Disposition, WindowFacts, WmClass};
+    use super::{
+        disposition, generic_lifecycle_eligibility, inspect, normalized_app_identity,
+        normalized_process_identity,
+    };
+    use crate::model::{Disposition, ProcessInfo, WindowFacts, WmClass};
 
     #[test]
     fn normalizes_reference_application_classes() {
@@ -335,5 +372,33 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("validated _NET_WM_PID"));
+    }
+
+    #[test]
+    fn ordinary_unknown_by_name_window_is_generic_lifecycle_eligible() {
+        let window = WindowFacts::test_window(10, "FeatherPad");
+        let inspection = inspect(10, vec![window]).expect("inspection");
+        assert_eq!(inspection.app_identity, "featherpad");
+        assert!(generic_lifecycle_eligibility(&inspection).is_ok());
+    }
+
+    #[test]
+    fn unstable_identity_is_not_generic_lifecycle_eligible() {
+        let window = WindowFacts::test_window(10, "");
+        let inspection = inspect(10, vec![window]).expect("inspection");
+        assert!(generic_lifecycle_eligibility(&inspection).is_err());
+    }
+
+    #[test]
+    fn process_identity_uses_the_same_normalization_as_windows() {
+        let process = ProcessInfo {
+            pid: 100,
+            uid: 1000,
+            parent_pid: Some(1),
+            name: "featherpad".to_string(),
+            executable: Some("/usr/bin/featherpad".to_string()),
+            command_line: Some("featherpad".to_string()),
+        };
+        assert_eq!(normalized_process_identity(&process), "featherpad");
     }
 }
