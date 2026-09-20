@@ -1,7 +1,7 @@
 use crate::control;
 use crate::identity::{self, normalized_app_identity};
 use crate::lifecycle::{
-    self, CloseDecision, FocusKind, HiddenWindows, QuitMethod,
+    self, ActiveTarget, CloseDecision, FocusKind, HiddenWindows, QuitMethod,
 };
 use crate::model::{Disposition, Inspection, Snapshot, WindowFacts};
 use crate::{process, report, x11, DynError};
@@ -9,7 +9,9 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt, GrabMode, ModMask};
+use x11rb::protocol::xproto::{
+    ChangeWindowAttributesAux, ConnectionExt, EventMask, GrabMode, ModMask,
+};
 use x11rb::protocol::Event;
 
 pub const DEFAULT_CLOSE_KEYCODE: u8 = 191;
@@ -57,16 +59,50 @@ fn action_name(decision: &CloseDecision) -> &'static str {
     }
 }
 
+fn is_actually_hidden(window: &WindowFacts) -> bool {
+    !window.mapped
+        || window
+            .states
+            .iter()
+            .any(|state| state == "_NET_WM_STATE_HIDDEN")
+}
+
 fn reconcile_hidden(hidden: &mut HiddenWindows, snapshot: &Snapshot) {
+    for window in snapshot
+        .windows
+        .iter()
+        .filter(|window| window.maclife_hidden && !is_actually_hidden(window))
+    {
+        if let Err(error) = control::clear_hidden_marker(window.xid) {
+            eprintln!(
+                "MacLife: could not clear stale hidden marker on 0x{:08x}: {error}",
+                window.xid
+            );
+        }
+    }
     let marked: Vec<_> = snapshot
         .windows
         .iter()
-        .filter(|window| window.maclife_hidden)
+        .filter(|window| window.maclife_hidden && is_actually_hidden(window))
         .map(|window| window.xid)
         .collect();
     hidden.retain_marked(&marked);
-    for window in snapshot.windows.iter().filter(|window| window.maclife_hidden) {
-        hidden.remember(window.xid, normalized_app_identity(window));
+    for window in snapshot
+        .windows
+        .iter()
+        .filter(|window| window.maclife_hidden && is_actually_hidden(window))
+    {
+        hidden.adopt(window.xid, normalized_app_identity(window));
+    }
+}
+
+fn observe_focus(hidden: &mut HiddenWindows, snapshot: &Snapshot) {
+    reconcile_hidden(hidden, snapshot);
+    if let Ok(inspection) = identity::inspect(snapshot.active_window, snapshot.windows.clone()) {
+        let _ = lifecycle::select_active_target(
+            hidden,
+            Some((inspection.identity_window.xid, focus_kind(&inspection))),
+        );
     }
 }
 
@@ -76,6 +112,10 @@ fn handle_close(
 ) -> Result<(), DynError> {
     let (snapshot, inspection) = focused_inspection()?;
     reconcile_hidden(hidden, &snapshot);
+    let _ = lifecycle::select_active_target(
+        hidden,
+        Some((inspection.identity_window.xid, focus_kind(&inspection))),
+    );
     let decision = lifecycle::close_decision(
         &inspection.app_identity,
         inspection.meaningful_windows.len(),
@@ -120,7 +160,7 @@ fn handle_close(
                 )
                 .into());
             }
-            hidden.remember(inspection.focused_xid, inspection.app_identity);
+            hidden.remember_as_logical(inspection.focused_xid, inspection.app_identity);
             Ok(())
         }
         CloseDecision::Refuse(reason) => Err(reason.into()),
@@ -251,12 +291,100 @@ fn quit_strawberry(inspection: &Inspection) -> Result<(), DynError> {
     command_status("/bin/kill", &["-TERM", &revalidated_pid.to_string()])
 }
 
-fn handle_quit(options: RunOptions) -> Result<(), DynError> {
-    let (_, inspection) = focused_inspection()?;
+#[derive(Clone, Copy, Debug)]
+enum QuitTargetSource {
+    Focused,
+    LogicalHidden,
+}
+
+impl QuitTargetSource {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Focused => "focused",
+            Self::LogicalHidden => "logical-hidden",
+        }
+    }
+}
+
+fn validate_logical_inspection(
+    hidden: &mut HiddenWindows,
+    snapshot: &Snapshot,
+    xid: u32,
+    expected_identity: &str,
+) -> Result<Inspection, DynError> {
+    let candidate = snapshot.windows.iter().find(|window| window.xid == xid);
+    let valid_window = candidate.is_some_and(|window| {
+        window.maclife_hidden
+            && is_actually_hidden(window)
+            && identity::disposition(window) == Disposition::Meaningful
+            && normalized_app_identity(window) == expected_identity
+    });
+    if !valid_window {
+        hidden.forget(xid);
+        return Err(format!(
+            "logical active window 0x{xid:08x} is no longer a valid MacLife-hidden {expected_identity} window"
+        )
+        .into());
+    }
+
+    let inspection = match identity::inspect(xid, snapshot.windows.clone()) {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            hidden.forget(xid);
+            return Err(error);
+        }
+    };
+    if inspection.app_identity != expected_identity {
+        hidden.forget(xid);
+        return Err(format!(
+            "logical active identity changed from {expected_identity} to {}",
+            inspection.app_identity
+        )
+        .into());
+    }
+    if matches!(
+        lifecycle::application_rule(expected_identity).quit,
+        QuitMethod::StrawberryMpris | QuitMethod::ValidatedPidTerm
+    ) {
+        if let Err(error) = validated_pid(&inspection.identity_window, expected_identity) {
+            hidden.forget(xid);
+            return Err(error);
+        }
+    }
+    Ok(inspection)
+}
+
+fn resolve_quit_target(
+    hidden: &mut HiddenWindows,
+) -> Result<(Inspection, QuitTargetSource), DynError> {
+    let snapshot = x11::collect_snapshot()?;
+    reconcile_hidden(hidden, &snapshot);
+    let focused = identity::inspect(snapshot.active_window, snapshot.windows.clone()).ok();
+    let focused_state = focused.as_ref().map(|inspection| {
+        (inspection.identity_window.xid, focus_kind(inspection))
+    });
+
+    match lifecycle::select_active_target(hidden, focused_state) {
+        ActiveTarget::Focused => focused
+            .map(|inspection| (inspection, QuitTargetSource::Focused))
+            .ok_or_else(|| "focused application disappeared during inspection".into()),
+        ActiveTarget::LogicalHidden { xid, identity } => {
+            let inspection = validate_logical_inspection(hidden, &snapshot, xid, &identity)?;
+            Ok((inspection, QuitTargetSource::LogicalHidden))
+        }
+        ActiveTarget::Refuse => Err(
+            "no meaningful focused application or valid MacLife-hidden logical app".into(),
+        ),
+    }
+}
+
+fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), DynError> {
+    let (inspection, source) = resolve_quit_target(hidden)?;
     let method = lifecycle::application_rule(&inspection.app_identity).quit;
     println!(
-        "Cmd+Q focused={} action=application-quit method={}",
+        "Cmd+Q target={} source={} action=application-quit method={}",
         inspection.app_identity,
+        source.name(),
         quit_method_name(method)
     );
     if options.verbose {
@@ -266,7 +394,7 @@ fn handle_quit(options: RunOptions) -> Result<(), DynError> {
         return Ok(());
     }
 
-    match method {
+    let result = match method {
         QuitMethod::StrawberryMpris => quit_strawberry(&inspection),
         QuitMethod::ThunarCli => command_status("thunar", &["--quit"]),
         QuitMethod::ValidatedPidTerm => terminate_validated_pid(&inspection),
@@ -281,7 +409,11 @@ fn handle_quit(options: RunOptions) -> Result<(), DynError> {
             inspection.app_identity
         )
         .into()),
+    };
+    if result.is_ok() {
+        hidden.forget_identity(&inspection.app_identity);
     }
+    result
 }
 
 pub fn run(options: RunOptions) -> Result<(), DynError> {
@@ -295,6 +427,18 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
         .get(screen_number)
         .ok_or("X11 screen number is out of range")?
         .root;
+    let active_window_atom = conn
+        .intern_atom(true, b"_NET_ACTIVE_WINDOW")?
+        .reply()?
+        .atom;
+    if active_window_atom == 0 {
+        return Err("X11 session does not expose _NET_ACTIVE_WINDOW".into());
+    }
+    conn.change_window_attributes(
+        root,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+    )?
+    .check()?;
     conn.grab_key(
         false,
         root,
@@ -328,17 +472,27 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
     );
 
     loop {
-        if let Event::KeyPress(event) = conn.wait_for_event()? {
-            let result = if event.detail == options.close_keycode {
-                handle_close(options, &mut hidden)
-            } else if event.detail == options.quit_keycode {
-                handle_quit(options)
-            } else {
-                continue;
-            };
-            if let Err(error) = result {
-                eprintln!("MacLife action refused/failed: {error}");
+        match conn.wait_for_event()? {
+            Event::KeyPress(event) => {
+                let result = if event.detail == options.close_keycode {
+                    handle_close(options, &mut hidden)
+                } else if event.detail == options.quit_keycode {
+                    handle_quit(options, &mut hidden)
+                } else {
+                    continue;
+                };
+                if let Err(error) = result {
+                    eprintln!("MacLife action refused/failed: {error}");
+                }
             }
+            Event::PropertyNotify(event)
+                if event.window == root && event.atom == active_window_atom =>
+            {
+                if let Ok(snapshot) = x11::collect_snapshot() {
+                    observe_focus(&mut hidden, &snapshot);
+                }
+            }
+            _ => {}
         }
     }
 }
