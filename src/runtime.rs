@@ -3,8 +3,8 @@ use crate::identity::{self, normalized_app_identity};
 use crate::lifecycle::{
     self, CloseDecision, FocusKind, HiddenWindows, QuitMethod,
 };
-use crate::model::{Disposition, Inspection, Snapshot};
-use crate::{report, x11, DynError};
+use crate::model::{Disposition, Inspection, Snapshot, WindowFacts};
+use crate::{process, report, x11, DynError};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -135,8 +135,14 @@ fn command_status(program: &str, arguments: &[&str]) -> Result<(), DynError> {
     Ok(())
 }
 
-fn terminate_validated_pid(inspection: &Inspection) -> Result<(), DynError> {
-    let window = &inspection.identity_window;
+fn validated_pid(window: &WindowFacts, expected_identity: &str) -> Result<u32, DynError> {
+    let identity = normalized_app_identity(window);
+    if identity != expected_identity {
+        return Err(format!(
+            "refusing SIGTERM: expected {expected_identity} identity, found {identity}"
+        )
+        .into());
+    }
     if !window.pid_validated {
         return Err(format!(
             "refusing SIGTERM: _NET_WM_PID is not validated ({})",
@@ -145,20 +151,104 @@ fn terminate_validated_pid(inspection: &Inspection) -> Result<(), DynError> {
         .into());
     }
     let pid = window.pid.ok_or("validated window has no PID")?;
+    let process = window
+        .process
+        .as_ref()
+        .ok_or("validated window has no process metadata")?;
+    if process.pid != pid {
+        return Err("refusing SIGTERM: window and process PIDs differ".into());
+    }
     if pid == std::process::id() {
         return Err("refusing to terminate MacLife itself".into());
     }
+    Ok(pid)
+}
+
+fn terminate_validated_pid(inspection: &Inspection) -> Result<(), DynError> {
+    let pid = validated_pid(&inspection.identity_window, &inspection.app_identity)?;
     command_status("/bin/kill", &["-TERM", &pid.to_string()])
+}
+
+fn revalidate_same_process(
+    original: &WindowFacts,
+    current: &WindowFacts,
+    expected_identity: &str,
+) -> Result<u32, DynError> {
+    if current.xid != original.xid {
+        return Err("refusing SIGTERM fallback: X11 window identity changed".into());
+    }
+    let original_pid = validated_pid(original, expected_identity)?;
+    let current_pid = validated_pid(current, expected_identity)?;
+    if current_pid != original_pid {
+        return Err(format!(
+            "refusing SIGTERM fallback: PID changed from {original_pid} to {current_pid}"
+        )
+        .into());
+    }
+
+    let original_process = original
+        .process
+        .as_ref()
+        .ok_or("original process metadata disappeared")?;
+    let current_process = current
+        .process
+        .as_ref()
+        .ok_or("current process metadata disappeared")?;
+    if current_process.uid != original_process.uid
+        || current_process.name != original_process.name
+        || current_process.executable != original_process.executable
+    {
+        return Err("refusing SIGTERM fallback: process identity changed".into());
+    }
+    Ok(original_pid)
 }
 
 fn quit_method_name(method: QuitMethod) -> &'static str {
     match method {
-        QuitMethod::StrawberryMpris => "mpris-quit",
+        QuitMethod::StrawberryMpris => "mpris-then-validated-pid-sigterm",
         QuitMethod::ThunarCli => "thunar--quit",
         QuitMethod::ValidatedPidTerm => "validated-pid-sigterm",
         QuitMethod::CloseEachWindow => "wm-delete-each-window",
         QuitMethod::Unsupported => "unsupported",
     }
+}
+
+fn quit_strawberry(inspection: &Inspection) -> Result<(), DynError> {
+    let original = &inspection.identity_window;
+    let pid = validated_pid(original, "strawberry")?;
+    command_status(
+        "gdbus",
+        &[
+            "call",
+            "--session",
+            "--dest",
+            "org.mpris.MediaPlayer2.strawberry",
+            "--object-path",
+            "/org/mpris/MediaPlayer2",
+            "--method",
+            "org.mpris.MediaPlayer2.Quit",
+        ],
+    )?;
+    thread::sleep(Duration::from_millis(750));
+    if process::read_process(pid).is_none() {
+        return Ok(());
+    }
+
+    let snapshot = x11::collect_snapshot()?;
+    let current = snapshot
+        .windows
+        .iter()
+        .find(|window| window.xid == original.xid)
+        .ok_or_else(|| {
+            format!(
+                "Strawberry PID {pid} remained after MPRIS Quit, but its original window disappeared; refusing SIGTERM fallback"
+            )
+        })?;
+    let revalidated_pid = revalidate_same_process(original, current, "strawberry")?;
+    eprintln!(
+        "MacLife: Strawberry MPRIS Quit returned but PID {revalidated_pid} remained; using revalidated SIGTERM fallback"
+    );
+    command_status("/bin/kill", &["-TERM", &revalidated_pid.to_string()])
 }
 
 fn handle_quit(options: RunOptions) -> Result<(), DynError> {
@@ -177,19 +267,7 @@ fn handle_quit(options: RunOptions) -> Result<(), DynError> {
     }
 
     match method {
-        QuitMethod::StrawberryMpris => command_status(
-            "gdbus",
-            &[
-                "call",
-                "--session",
-                "--dest",
-                "org.mpris.MediaPlayer2.strawberry",
-                "--object-path",
-                "/org/mpris/MediaPlayer2",
-                "--method",
-                "org.mpris.MediaPlayer2.Quit",
-            ],
-        ),
+        QuitMethod::StrawberryMpris => quit_strawberry(&inspection),
         QuitMethod::ThunarCli => command_status("thunar", &["--quit"]),
         QuitMethod::ValidatedPidTerm => terminate_validated_pid(&inspection),
         QuitMethod::CloseEachWindow => {
@@ -307,4 +385,52 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
     control::clear_hidden_marker(window.xid)?;
     println!("restored={} xid=0x{:08x}", wanted, window.xid);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::revalidate_same_process;
+    use crate::model::{ProcessInfo, WindowFacts};
+
+    fn strawberry_window(xid: u32, pid: u32) -> WindowFacts {
+        let mut window = WindowFacts::test_window(xid, "Strawberry");
+        window.pid = Some(pid);
+        window.pid_validated = true;
+        window.pid_validation = format!("same-user local /proc/{pid}");
+        window.process = Some(ProcessInfo {
+            pid,
+            uid: 1000,
+            parent_pid: Some(1),
+            name: "strawberry".to_string(),
+            executable: Some("/usr/bin/strawberry".to_string()),
+            command_line: Some("strawberry".to_string()),
+        });
+        window
+    }
+
+    #[test]
+    fn strawberry_fallback_requires_same_freshly_validated_process() {
+        let original = strawberry_window(10, 1234);
+        let current = original.clone();
+        assert_eq!(
+            revalidate_same_process(&original, &current, "strawberry").expect("same process"),
+            1234
+        );
+    }
+
+    #[test]
+    fn strawberry_fallback_rejects_pid_or_validation_changes() {
+        let original = strawberry_window(10, 1234);
+
+        let mut changed_pid = strawberry_window(10, 5678);
+        assert!(revalidate_same_process(&original, &changed_pid, "strawberry").is_err());
+
+        changed_pid = original.clone();
+        changed_pid.pid_validated = false;
+        changed_pid.pid_validation = "process unavailable".to_string();
+        assert!(revalidate_same_process(&original, &changed_pid, "strawberry").is_err());
+
+        let changed_identity = WindowFacts::test_window(10, "Other");
+        assert!(revalidate_same_process(&original, &changed_identity, "strawberry").is_err());
+    }
 }
