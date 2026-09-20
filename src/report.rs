@@ -1,3 +1,4 @@
+use crate::compatibility;
 use crate::identity::normalized_app_identity;
 use crate::model::{Disposition, Inspection, WindowFacts};
 use std::fmt::Write;
@@ -130,6 +131,29 @@ pub fn render(inspection: &Inspection, verbose: bool) -> String {
     }
 
     if verbose {
+        let _ = writeln!(output, "\nCompatibility/process resolution");
+        let _ = writeln!(output, "--------------------------------");
+        if let Some(adapter) = compatibility::adapter_for(&inspection.app_identity) {
+            let _ = writeln!(output, "  Adapter: {}", adapter.name);
+            let _ = writeln!(
+                output,
+                "  Application family: {}",
+                adapter.family.unwrap_or("none")
+            );
+            let _ = writeln!(
+                output,
+                "  Accepted process identities: {}",
+                adapter.process_identities.join(", ")
+            );
+            let _ = writeln!(
+                output,
+                "  Process resolution: {}",
+                compatibility::resolution_summary(adapter, inspection)
+            );
+        } else {
+            let _ = writeln!(output, "  Adapter: none");
+            let _ = writeln!(output, "  Process resolution: generic or dedicated policy");
+        }
         let _ = writeln!(output, "\nVerbose grouping/filter decisions");
         let _ = writeln!(output, "---------------------------------");
         for decision in &inspection.decisions {

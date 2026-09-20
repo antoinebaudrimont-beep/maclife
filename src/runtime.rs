@@ -1,3 +1,4 @@
+use crate::compatibility::{self, CompatibilityAdapter, CompatibilityQuit};
 use crate::control;
 use crate::identity::{self, normalized_app_identity};
 use crate::input::{IntentDevices, KeyPhase, LifecycleChordTracker};
@@ -263,11 +264,15 @@ fn handle_close(
         inspection.meaningful_windows.len(),
         focus_kind(&inspection),
     );
+    let adapter = compatibility::adapter_for(&inspection.app_identity)
+        .map(|adapter| adapter.name)
+        .unwrap_or("none");
     println!(
-        "Cmd+W focused={} meaningful_windows={} policy={} action={} xid=0x{:08x}",
+        "Cmd+W focused={} meaningful_windows={} policy={} adapter={} action={} xid=0x{:08x}",
         inspection.app_identity,
         inspection.meaningful_windows.len(),
         policy.kind.name(),
+        adapter,
         action_name(&decision),
         inspection.focused_xid
     );
@@ -326,6 +331,10 @@ fn validated_pid(window: &WindowFacts, expected_identity: &str) -> Result<u32, D
         )
         .into());
     }
+    validated_local_pid(window)
+}
+
+fn validated_local_pid(window: &WindowFacts) -> Result<u32, DynError> {
     if !window.pid_validated {
         return Err(format!(
             "refusing SIGTERM: _NET_WM_PID is not validated ({})",
@@ -401,14 +410,23 @@ fn revalidate_same_process(
     current: &WindowFacts,
     expected_identity: &str,
 ) -> Result<u32, DynError> {
-    if current.xid != original.xid {
-        return Err("refusing SIGTERM: X11 window identity changed".into());
-    }
     let original_pid = validated_pid(original, expected_identity)?;
     let current_pid = validated_pid(current, expected_identity)?;
+    revalidate_process_metadata(original, current, original_pid, current_pid)
+}
+
+fn revalidate_process_metadata(
+    original: &WindowFacts,
+    current: &WindowFacts,
+    original_pid: u32,
+    current_pid: u32,
+) -> Result<u32, DynError> {
+    if current.xid != original.xid {
+        return Err("refusing action: X11 window identity changed".into());
+    }
     if current_pid != original_pid {
         return Err(format!(
-            "refusing SIGTERM: PID changed from {original_pid} to {current_pid}"
+            "refusing action: PID changed from {original_pid} to {current_pid}"
         )
         .into());
     }
@@ -427,9 +445,43 @@ fn revalidate_same_process(
         || current_process.executable != original_process.executable
         || current_process.command_line != original_process.command_line
     {
-        return Err("refusing SIGTERM: process identity changed".into());
+        return Err("refusing action: process identity changed".into());
     }
     Ok(original_pid)
+}
+
+fn quit_with_compatibility_adapter(
+    adapter: &CompatibilityAdapter,
+    original: &Inspection,
+) -> Result<(), DynError> {
+    let original_pid = compatibility::validate_inspection(adapter, original)?;
+    let snapshot = x11::collect_snapshot()?;
+    let current = identity::inspect(original.identity_window.xid, snapshot.windows.clone())?;
+    if current.app_identity != original.app_identity {
+        return Err(format!(
+            "adapter {} refuses changed application identity {} -> {}",
+            adapter.name, original.app_identity, current.app_identity
+        )
+        .into());
+    }
+    let current_pid = compatibility::validate_inspection(adapter, &current)?;
+    revalidate_process_metadata(
+        &original.identity_window,
+        &current.identity_window,
+        original_pid,
+        current_pid,
+    )?;
+
+    let windows = match adapter.quit {
+        CompatibilityQuit::CloseLogicalWindows => current.meaningful_windows,
+        CompatibilityQuit::CloseFamilyWindows => {
+            compatibility::family_windows(adapter, &snapshot.windows)?
+        }
+    };
+    for window in windows {
+        control::request_close(window.xid)?;
+    }
+    Ok(())
 }
 
 fn terminate_revalidated_pid(
@@ -612,6 +664,42 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
         );
         return Err(reason.into());
     }
+    if policy.kind == PolicyKind::Generic {
+        if let Some(adapter) = compatibility::adapter_for(&inspection.app_identity) {
+            if let Err(reason) = compatibility::validate_inspection(adapter, &inspection) {
+                println!(
+                    "Cmd+Q target={} source={} policy={} adapter={} result=refused reason={}",
+                    inspection.app_identity,
+                    source.name(),
+                    policy.kind.name(),
+                    adapter.name,
+                    reason
+                );
+                return Err(reason.into());
+            }
+            println!(
+                "Cmd+Q target={} source={} policy={} adapter={} action=application-quit method={}",
+                inspection.app_identity,
+                source.name(),
+                policy.kind.name(),
+                adapter.name,
+                adapter.quit.name()
+            );
+            if options.verbose {
+                print!("{}", report::render(&inspection, true));
+            }
+            if options.dry_run {
+                return Ok(());
+            }
+            let result = quit_with_compatibility_adapter(adapter, &inspection);
+            if result.is_ok() {
+                for identity in adapter.window_identities {
+                    hidden.forget_identity(identity);
+                }
+            }
+            return result;
+        }
+    }
     if method == QuitMethod::GenericValidatedPidTerm {
         if let Err(error) = generic_process_pid(&inspection) {
             println!(
@@ -625,7 +713,7 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
         }
     }
     println!(
-        "Cmd+Q target={} source={} policy={} action=application-quit method={}",
+        "Cmd+Q target={} source={} policy={} adapter=none action=application-quit method={}",
         inspection.app_identity,
         source.name(),
         policy.kind.name(),
@@ -921,9 +1009,11 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        generic_process_pid, is_adoptable_hidden, revalidate_same_process,
+        generic_process_pid, is_adoptable_hidden, revalidate_process_metadata,
+        revalidate_same_process,
         select_restore_candidate,
     };
+    use crate::compatibility;
     use crate::identity;
     use crate::model::{ProcessInfo, WindowFacts};
 
@@ -1010,6 +1100,30 @@ mod tests {
         let second = process_window(20, "FeatherPad", 5678, "featherpad");
         let inspection = identity::inspect(10, vec![first, second]).expect("inspection");
         assert!(generic_process_pid(&inspection).is_err());
+    }
+
+    #[test]
+    fn compatibility_revalidation_rejects_changed_process_metadata() {
+        let original = process_window(10, "thunderbird-default", 1234, "thunderbird-bin");
+        let mut current = original.clone();
+        current.process.as_mut().expect("process").command_line =
+            Some("thunderbird-bin --changed".to_string());
+        let adapter = compatibility::adapter_for("thunderbird-default").expect("adapter");
+        let original_inspection =
+            identity::inspect(10, vec![original.clone()]).expect("inspection");
+        let current_inspection =
+            identity::inspect(10, vec![current.clone()]).expect("inspection");
+        let original_pid =
+            compatibility::validate_inspection(adapter, &original_inspection).expect("PID");
+        let current_pid =
+            compatibility::validate_inspection(adapter, &current_inspection).expect("PID");
+        assert!(revalidate_process_metadata(
+            &original,
+            &current,
+            original_pid,
+            current_pid
+        )
+        .is_err());
     }
 
     #[test]

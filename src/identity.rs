@@ -197,6 +197,19 @@ fn grouping_rule(anchor: &WindowFacts, candidate: &WindowFacts) -> Option<String
         return Some(rule.to_string());
     }
 
+    let anchor_has_class = anchor.wm_class.as_ref().is_some_and(|class| {
+        !class.class.trim().is_empty() || !class.instance.trim().is_empty()
+    });
+    let candidate_has_class = candidate.wm_class.as_ref().is_some_and(|class| {
+        !class.class.trim().is_empty() || !class.instance.trim().is_empty()
+    });
+    if anchor_has_class && candidate_has_class {
+        // A shared process is not sufficient to merge two explicit, different
+        // application identities. Chromium/PWA and office-suite processes can
+        // host several logical applications at once.
+        return None;
+    }
+
     if anchor.pid_validated
         && candidate.pid_validated
         && anchor.pid.is_some()
@@ -327,6 +340,21 @@ mod tests {
 
         let result = inspect(10, vec![origin, browser]).expect("inspection");
         assert_eq!(result.app_identity, "brave-origin");
+        assert_eq!(result.meaningful_windows.len(), 1);
+        assert_eq!(result.meaningful_windows[0].xid, 10);
+    }
+
+    #[test]
+    fn shared_pid_never_overrides_distinct_explicit_window_classes() {
+        let mut spotify = WindowFacts::test_window(10, "spotifyweb");
+        spotify.pid = Some(100);
+        spotify.pid_validated = true;
+        let mut brave = WindowFacts::test_window(20, "brave-browser");
+        brave.pid = Some(100);
+        brave.pid_validated = true;
+
+        let result = inspect(10, vec![spotify, brave]).expect("inspection");
+        assert_eq!(result.app_identity, "spotifyweb");
         assert_eq!(result.meaningful_windows.len(), 1);
         assert_eq!(result.meaningful_windows[0].xid, 10);
     }

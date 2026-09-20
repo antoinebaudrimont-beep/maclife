@@ -1,6 +1,7 @@
 //! Read-only X11 application identity inspection.
 
 pub mod control;
+pub mod compatibility;
 pub mod identity;
 pub mod input;
 pub mod lifecycle;
