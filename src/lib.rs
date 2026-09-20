@@ -2,6 +2,7 @@
 
 pub mod control;
 pub mod identity;
+pub mod input;
 pub mod lifecycle;
 pub mod model;
 pub mod process;

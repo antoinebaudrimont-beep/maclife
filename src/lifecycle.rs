@@ -100,6 +100,7 @@ pub enum ActiveTarget {
 pub struct HiddenWindows {
     entries: HashMap<u32, String>,
     logical_active: Option<u32>,
+    pointer_intent_pending: bool,
 }
 
 impl HiddenWindows {
@@ -110,12 +111,14 @@ impl HiddenWindows {
     pub fn remember_as_logical(&mut self, xid: u32, identity: impl Into<String>) {
         self.entries.insert(xid, identity.into());
         self.logical_active = Some(xid);
+        self.pointer_intent_pending = false;
     }
 
     pub fn forget(&mut self, xid: u32) {
         self.entries.remove(&xid);
         if self.logical_active == Some(xid) {
             self.logical_active = None;
+            self.pointer_intent_pending = false;
         }
     }
 
@@ -127,6 +130,7 @@ impl HiddenWindows {
         self.entries.retain(|_, stored| stored != identity);
         if removed_logical {
             self.logical_active = None;
+            self.pointer_intent_pending = false;
         }
     }
 
@@ -149,6 +153,7 @@ impl HiddenWindows {
             .is_some_and(|xid| !self.entries.contains_key(&xid))
         {
             self.logical_active = None;
+            self.pointer_intent_pending = false;
         }
     }
 
@@ -158,34 +163,58 @@ impl HiddenWindows {
             .get(&xid)
             .map(|identity| (xid, identity.as_str()))
     }
+
+    pub fn confirm_user_focus(&mut self, xid: u32) -> Option<String> {
+        self.pointer_intent_pending = false;
+        let logical_xid = self.logical_active?;
+        if logical_xid == xid {
+            return None;
+        }
+        let identity = self.entries.get(&logical_xid)?.clone();
+        self.logical_active = None;
+        Some(identity)
+    }
+
+    pub fn note_pointer_intent(&mut self) {
+        if self.logical_active.is_some() {
+            self.pointer_intent_pending = true;
+        }
+    }
+
+    pub fn pointer_intent_pending(&self) -> bool {
+        self.pointer_intent_pending
+    }
+
+    pub fn clear_pointer_intent(&mut self) {
+        self.pointer_intent_pending = false;
+    }
 }
 
 pub fn select_active_target(
-    hidden: &mut HiddenWindows,
+    hidden: &HiddenWindows,
     focused: Option<(u32, FocusKind)>,
 ) -> ActiveTarget {
-    match focused {
-        Some((xid, FocusKind::Meaningful | FocusKind::Attached)) => {
-            if hidden.logical_active.is_some_and(|logical| logical != xid) {
-                hidden.logical_active = None;
-            }
-            ActiveTarget::Focused
-        }
-        Some((_, FocusKind::Excluded)) | None => hidden
-            .logical_active()
-            .map(|(xid, identity)| ActiveTarget::LogicalHidden {
-                xid,
-                identity: identity.to_string(),
-            })
-            .unwrap_or(ActiveTarget::Refuse),
+    if let Some((xid, identity)) = hidden.logical_active() {
+        return ActiveTarget::LogicalHidden {
+            xid,
+            identity: identity.to_string(),
+        };
     }
+    match focused {
+        Some((_, FocusKind::Meaningful | FocusKind::Attached)) => ActiveTarget::Focused,
+        Some((_, FocusKind::Excluded)) | None => ActiveTarget::Refuse,
+    }
+}
+
+pub fn keyboard_confirms_user_intent(keycode: u32, close_keycode: u8, quit_keycode: u8) -> bool {
+    keycode != u32::from(close_keycode) && keycode != u32::from(quit_keycode)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        application_rule, close_decision, select_active_target, ActiveTarget, CloseDecision,
-        FocusKind, HiddenWindows, LastWindowAction, QuitMethod,
+        application_rule, close_decision, keyboard_confirms_user_intent, select_active_target,
+        ActiveTarget, CloseDecision, FocusKind, HiddenWindows, LastWindowAction, QuitMethod,
     };
 
     #[test]
@@ -279,7 +308,7 @@ mod tests {
         let mut hidden = HiddenWindows::default();
         hidden.remember_as_logical(10, "strawberry");
         assert_eq!(
-            select_active_target(&mut hidden, Some((99, FocusKind::Excluded))),
+            select_active_target(&hidden, Some((99, FocusKind::Excluded))),
             ActiveTarget::LogicalHidden {
                 xid: 10,
                 identity: "strawberry".to_string(),
@@ -288,14 +317,58 @@ mod tests {
     }
 
     #[test]
-    fn meaningful_focus_supersedes_a_hidden_logical_app() {
+    fn automatic_meaningful_focus_preserves_a_hidden_logical_app() {
         let mut hidden = HiddenWindows::default();
         hidden.remember_as_logical(10, "strawberry");
         assert_eq!(
-            select_active_target(&mut hidden, Some((20, FocusKind::Meaningful))),
-            ActiveTarget::Focused
+            select_active_target(&hidden, Some((20, FocusKind::Meaningful))),
+            ActiveTarget::LogicalHidden {
+                xid: 10,
+                identity: "strawberry".to_string(),
+            }
         );
+        assert_eq!(hidden.logical_active(), Some((10, "strawberry")));
+    }
+
+    #[test]
+    fn confirmed_brave_or_terminal_interaction_supersedes_hidden_strawberry() {
+        for focused_xid in [20, 30] {
+            let mut hidden = HiddenWindows::default();
+            hidden.remember_as_logical(10, "strawberry");
+            assert_eq!(
+                hidden.confirm_user_focus(focused_xid),
+                Some("strawberry".to_string())
+            );
+            assert_eq!(
+                select_active_target(&hidden, Some((focused_xid, FocusKind::Meaningful))),
+                ActiveTarget::Focused
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_intent_waits_for_focus_confirmation() {
+        let mut hidden = HiddenWindows::default();
+        hidden.remember_as_logical(10, "strawberry");
+        hidden.note_pointer_intent();
+        assert!(hidden.pointer_intent_pending());
+        assert_eq!(
+            select_active_target(&hidden, Some((20, FocusKind::Meaningful))),
+            ActiveTarget::LogicalHidden {
+                xid: 10,
+                identity: "strawberry".to_string(),
+            }
+        );
+        hidden.confirm_user_focus(20);
+        assert!(!hidden.pointer_intent_pending());
         assert_eq!(hidden.logical_active(), None);
+    }
+
+    #[test]
+    fn lifecycle_keys_do_not_confirm_new_app_intent() {
+        assert!(!keyboard_confirms_user_intent(191, 191, 192));
+        assert!(!keyboard_confirms_user_intent(192, 191, 192));
+        assert!(keyboard_confirms_user_intent(38, 191, 192));
     }
 
     #[test]
@@ -304,13 +377,13 @@ mod tests {
         invalid.remember_as_logical(10, "strawberry");
         invalid.retain_marked(&[]);
         assert_eq!(
-            select_active_target(&mut invalid, Some((99, FocusKind::Excluded))),
+            select_active_target(&invalid, Some((99, FocusKind::Excluded))),
             ActiveTarget::Refuse
         );
 
-        let mut absent = HiddenWindows::default();
+        let absent = HiddenWindows::default();
         assert_eq!(
-            select_active_target(&mut absent, Some((99, FocusKind::Excluded))),
+            select_active_target(&absent, Some((99, FocusKind::Excluded))),
             ActiveTarget::Refuse
         );
     }

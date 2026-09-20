@@ -8,7 +8,7 @@ This repository contains **Milestone 3**: the Milestone 2 identity engine plus a
 
 Requirements:
 
-- an X11 session with EWMH support (the target is xfwm4 4.20);
+- an X11 session with EWMH and XInput2 support (the target is xfwm4 4.20);
 - Rust 1.85 or newer;
 - access to the session's `DISPLAY` and X authority.
 
@@ -40,7 +40,9 @@ Verbose mode adds one line for every managed client, explaining whether it was m
 
 With more than one meaningful application window, Command+W requests a normal close of the focused window. A focused attached dialog is closed normally and never causes its owner to be hidden. Restore acts only on a window bearing MacLife's private hidden marker and refuses ambiguous matches.
 
-After MacLife hides a final window, an excluded focus target such as xfdesktop may replace it. In that narrow state, Command+Q targets the most recently MacLife-hidden application. The fallback is cleared when another meaningful application gains focus, the hidden window is restored or destroyed, its marker/identity/process validation fails, or the application is explicitly quit. Command+W never uses this fallback.
+After MacLife hides a final window, xfwm4 may automatically focus another application. A focus change alone does not replace the logical hidden target, so an immediate Command+Q still applies to the application the user just hid. MacLife replaces that target only after confirmed user keyboard or button interaction with another meaningful application. Restore, destruction, marker loss, failed identity/PID validation, and successful quit also clear it. Command+W never uses the logical fallback.
+
+User intent is observed through XInput2 raw events. Keyboard events are accepted only from enabled `XWayKeyz (virtual) Keyboard` slave devices discovered dynamically by name; F13/F14 are explicitly ignored. Button events are accepted from enabled non-XTEST, non-XWayKeyz slave pointers and are resolved after focus settles or before the next lifecycle command. Device hierarchy changes refresh these sets without hard-coded IDs. If intent is ambiguous, MacLife conservatively preserves the hidden logical target.
 
 ## Identity strategy
 
@@ -81,7 +83,7 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 
 ## Verification status
 
-Automated tests cover normalization, filtering, transient ownership, multi-window class grouping, distinct-leader boundaries, lifecycle policy (including Thunar), logical-active hidden-window bookkeeping, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
+Automated tests cover normalization, filtering, transient ownership, multi-window class grouping, distinct-leader boundaries, lifecycle policy (including Thunar), logical-active state transitions, XInput device classification, lifecycle-key exclusion, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
 
 Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md). Milestone 3's interactive checklist and corrective-pass validation record are in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md).
 

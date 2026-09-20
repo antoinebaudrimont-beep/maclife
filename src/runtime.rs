@@ -1,5 +1,6 @@
 use crate::control;
 use crate::identity::{self, normalized_app_identity};
+use crate::input::IntentDevices;
 use crate::lifecycle::{
     self, ActiveTarget, CloseDecision, FocusKind, HiddenWindows, QuitMethod,
 };
@@ -96,26 +97,84 @@ fn reconcile_hidden(hidden: &mut HiddenWindows, snapshot: &Snapshot) {
     }
 }
 
-fn observe_focus(hidden: &mut HiddenWindows, snapshot: &Snapshot) {
+fn apply_confirmed_interaction(
+    hidden: &mut HiddenWindows,
+    inspection: &Inspection,
+    source: &str,
+    verbose: bool,
+) {
+    let previous = hidden.confirm_user_focus(inspection.identity_window.xid);
+    if verbose {
+        if let Some(previous) = previous {
+            println!(
+                "user-intent {} source={} logical_active {} -> {}",
+                inspection.app_identity, source, previous, inspection.app_identity
+            );
+        }
+    }
+}
+
+fn observe_focus(hidden: &mut HiddenWindows, snapshot: &Snapshot, verbose: bool) {
     reconcile_hidden(hidden, snapshot);
     if let Ok(inspection) = identity::inspect(snapshot.active_window, snapshot.windows.clone()) {
-        let _ = lifecycle::select_active_target(
-            hidden,
-            Some((inspection.identity_window.xid, focus_kind(&inspection))),
-        );
+        let focus = focus_kind(&inspection);
+        if matches!(focus, FocusKind::Meaningful | FocusKind::Attached) {
+            if hidden.pointer_intent_pending() {
+                apply_confirmed_interaction(hidden, &inspection, "button", verbose);
+            } else if let Some((logical_xid, logical_identity)) = hidden.logical_active() {
+                if logical_xid != inspection.identity_window.xid && verbose {
+                    println!(
+                        "focus-change {} source=wm-automatic logical_active={} preserved",
+                        inspection.app_identity, logical_identity
+                    );
+                }
+            }
+        }
     }
+}
+
+fn confirm_current_interaction(
+    hidden: &mut HiddenWindows,
+    source: &str,
+    finalize_pointer: bool,
+    verbose: bool,
+) -> Result<(), DynError> {
+    if hidden.logical_active().is_none() {
+        hidden.clear_pointer_intent();
+        return Ok(());
+    }
+    let snapshot = x11::collect_snapshot()?;
+    reconcile_hidden(hidden, &snapshot);
+    let inspection = identity::inspect(snapshot.active_window, snapshot.windows.clone()).ok();
+    if let Some(inspection) = inspection.filter(|value| {
+        matches!(focus_kind(value), FocusKind::Meaningful | FocusKind::Attached)
+    }) {
+        apply_confirmed_interaction(hidden, &inspection, source, verbose);
+    } else {
+        if finalize_pointer {
+            hidden.clear_pointer_intent();
+        }
+        if verbose {
+            if let Some((_, logical_identity)) = hidden.logical_active() {
+                println!(
+                    "user-intent source={} focus=excluded logical_active={} preserved",
+                    source, logical_identity
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_close(
     options: RunOptions,
     hidden: &mut HiddenWindows,
 ) -> Result<(), DynError> {
+    if hidden.pointer_intent_pending() {
+        confirm_current_interaction(hidden, "button", true, options.verbose)?;
+    }
     let (snapshot, inspection) = focused_inspection()?;
     reconcile_hidden(hidden, &snapshot);
-    let _ = lifecycle::select_active_target(
-        hidden,
-        Some((inspection.identity_window.xid, focus_kind(&inspection))),
-    );
     let decision = lifecycle::close_decision(
         &inspection.app_identity,
         inspection.meaningful_windows.len(),
@@ -379,6 +438,9 @@ fn resolve_quit_target(
 }
 
 fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), DynError> {
+    if hidden.pointer_intent_pending() {
+        confirm_current_interaction(hidden, "button", true, options.verbose)?;
+    }
     let (inspection, source) = resolve_quit_target(hidden)?;
     let method = lifecycle::application_rule(&inspection.app_identity).quit;
     println!(
@@ -439,6 +501,7 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
         &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
     )?
     .check()?;
+    let mut intent_devices = IntentDevices::initialize(&conn, root)?;
     conn.grab_key(
         false,
         root,
@@ -459,16 +522,23 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
     .check()?;
     conn.flush()?;
 
+    if !intent_devices.has_toshy_keyboard() {
+        eprintln!(
+            "MacLife: no enabled XWayKeyz virtual keyboard found; keyboard intent remains conservative"
+        );
+    }
+
     let mut hidden = HiddenWindows::default();
     if let Ok(snapshot) = x11::collect_snapshot() {
         reconcile_hidden(&mut hidden, &snapshot);
     }
     println!(
-        "MacLife listening: close_keycode={} quit_keycode={} dry_run={} adopted_hidden={}",
+        "MacLife listening: close_keycode={} quit_keycode={} dry_run={} adopted_hidden={} {}",
         options.close_keycode,
         options.quit_keycode,
         options.dry_run,
-        hidden.len()
+        hidden.len(),
+        intent_devices.summary()
     );
 
     loop {
@@ -489,7 +559,52 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
                 if event.window == root && event.atom == active_window_atom =>
             {
                 if let Ok(snapshot) = x11::collect_snapshot() {
-                    observe_focus(&mut hidden, &snapshot);
+                    observe_focus(&mut hidden, &snapshot, options.verbose);
+                }
+            }
+            Event::XinputRawKeyPress(event)
+                if intent_devices.is_toshy_keyboard(event.sourceid) =>
+            {
+                if lifecycle::keyboard_confirms_user_intent(
+                    event.detail,
+                    options.close_keycode,
+                    options.quit_keycode,
+                ) {
+                    if let Err(error) = confirm_current_interaction(
+                        &mut hidden,
+                        "keyboard",
+                        false,
+                        options.verbose,
+                    ) {
+                        eprintln!("MacLife user-intent observation failed: {error}");
+                    }
+                } else if options.verbose {
+                    if let Some((_, logical_identity)) = hidden.logical_active() {
+                        println!(
+                            "user-intent source=lifecycle-key keycode={} logical_active={} preserved",
+                            event.detail, logical_identity
+                        );
+                    }
+                }
+            }
+            Event::XinputRawButtonPress(event)
+                if intent_devices.is_user_pointer(event.sourceid) =>
+            {
+                if hidden.logical_active().is_some() {
+                    hidden.note_pointer_intent();
+                    if options.verbose {
+                        println!(
+                            "user-intent source=button pending-focus-confirmation sourceid={}",
+                            event.sourceid
+                        );
+                    }
+                }
+            }
+            Event::XinputHierarchy(_) => {
+                if let Err(error) = intent_devices.refresh(&conn) {
+                    eprintln!("MacLife XInput device refresh failed: {error}");
+                } else if options.verbose {
+                    println!("XInput devices refreshed: {}", intent_devices.summary());
                 }
             }
             _ => {}
