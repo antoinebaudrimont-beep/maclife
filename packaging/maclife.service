@@ -1,0 +1,17 @@
+[Unit]
+Description=MacLife X11 application lifecycle daemon
+Documentation=https://github.com/antoinebaudrimont-beep/maclife
+ConditionEnvironment=DISPLAY
+ConditionEnvironment=XDG_SESSION_TYPE=x11
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/maclife run
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=5s
+KillSignal=SIGTERM
+SyslogIdentifier=maclife
+UMask=0077

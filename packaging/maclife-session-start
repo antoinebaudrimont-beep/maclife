@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+if [ "${XDG_SESSION_TYPE:-}" != "x11" ] || [ -z "${DISPLAY:-}" ]; then
+    printf '%s\n' "MacLife: not starting outside an active X11 session" >&2
+    exit 0
+fi
+
+systemctl --user import-environment DISPLAY XDG_SESSION_TYPE
+
+if [ -n "${XAUTHORITY:-}" ]; then
+    systemctl --user import-environment XAUTHORITY
+fi
+if [ -n "${XDG_CURRENT_DESKTOP:-}" ]; then
+    systemctl --user import-environment XDG_CURRENT_DESKTOP
+fi
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS
+fi
+
+systemctl --user reset-failed maclife.service >/dev/null 2>&1 || true
+exec systemctl --user start maclife.service
