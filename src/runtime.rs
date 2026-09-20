@@ -1,6 +1,6 @@
 use crate::control;
 use crate::identity::{self, normalized_app_identity};
-use crate::input::IntentDevices;
+use crate::input::{IntentDevices, KeyPhase, LifecycleChordTracker};
 use crate::lifecycle::{
     self, ActiveTarget, CloseDecision, FocusKind, HiddenWindows, QuitMethod,
 };
@@ -164,6 +164,51 @@ fn confirm_current_interaction(
         }
     }
     Ok(())
+}
+
+fn observe_keyboard_intent(
+    hidden: &mut HiddenWindows,
+    tracker: &mut LifecycleChordTracker,
+    keycode: u32,
+    phase: KeyPhase,
+    sourceid: u16,
+    options: RunOptions,
+) {
+    let intent = tracker.observe(
+        keycode,
+        phase,
+        options.close_keycode,
+        options.quit_keycode,
+    );
+    let log_input = !matches!(
+        intent,
+        crate::input::KeyIntent::User | crate::input::KeyIntent::Release
+    ) || hidden.logical_active().is_some();
+    if options.verbose && log_input {
+        println!(
+            "input device=XWayKeyz sourceid={} keycode={} event={} classification={}",
+            sourceid,
+            keycode,
+            phase.label(),
+            intent.label()
+        );
+    }
+    if intent.confirms_user_intent() {
+        if let Err(error) =
+            confirm_current_interaction(hidden, "keyboard", false, options.verbose)
+        {
+            eprintln!("MacLife user-intent observation failed: {error}");
+        }
+    } else if options.verbose {
+        if let Some((_, logical_identity)) = hidden.logical_active() {
+            println!(
+                "user-intent source={} keycode={} logical_active={} preserved",
+                intent.label(),
+                keycode,
+                logical_identity
+            );
+        }
+    }
 }
 
 fn handle_close(
@@ -502,6 +547,7 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
     )?
     .check()?;
     let mut intent_devices = IntentDevices::initialize(&conn, root)?;
+    let mut chord_tracker = LifecycleChordTracker::default();
     conn.grab_key(
         false,
         root,
@@ -565,27 +611,26 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
             Event::XinputRawKeyPress(event)
                 if intent_devices.is_toshy_keyboard(event.sourceid) =>
             {
-                if lifecycle::keyboard_confirms_user_intent(
+                observe_keyboard_intent(
+                    &mut hidden,
+                    &mut chord_tracker,
                     event.detail,
-                    options.close_keycode,
-                    options.quit_keycode,
-                ) {
-                    if let Err(error) = confirm_current_interaction(
-                        &mut hidden,
-                        "keyboard",
-                        false,
-                        options.verbose,
-                    ) {
-                        eprintln!("MacLife user-intent observation failed: {error}");
-                    }
-                } else if options.verbose {
-                    if let Some((_, logical_identity)) = hidden.logical_active() {
-                        println!(
-                            "user-intent source=lifecycle-key keycode={} logical_active={} preserved",
-                            event.detail, logical_identity
-                        );
-                    }
-                }
+                    KeyPhase::Press,
+                    event.sourceid,
+                    options,
+                );
+            }
+            Event::XinputRawKeyRelease(event)
+                if intent_devices.is_toshy_keyboard(event.sourceid) =>
+            {
+                observe_keyboard_intent(
+                    &mut hidden,
+                    &mut chord_tracker,
+                    event.detail,
+                    KeyPhase::Release,
+                    event.sourceid,
+                    options,
+                );
             }
             Event::XinputRawButtonPress(event)
                 if intent_devices.is_user_pointer(event.sourceid) =>

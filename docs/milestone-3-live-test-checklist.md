@@ -2,6 +2,19 @@
 
 These checks require deliberate physical key presses in the real XFCE/X11 session. Keep ChatGPT and the development terminal out of destructive Command+Q testing.
 
+## Physical lifecycle-chord correction (2026-09-20)
+
+The real `XWayKeyz (virtual) Keyboard` trace established that Toshy frames F13/F14 with keycode 105 (`Control_R`): `105 down/up, 191 or 192 down/up, 105 down/up`. The first wrapper event was the remaining source of false focus intent after xfwm4 automatically selected another application. MacLife now defers the exact precursor and suppresses the matching lifecycle suffix by device, keycode, and order. It does not use a timer or ignore modifiers generally. The daemon also tolerates the raw lifecycle-key release being absent while its passive grab is active.
+
+Physical validation with the corrected release build passed:
+
+- **A — critical regression:** Strawberry hid, xfwm4 automatically focused the disposable Terminal, and an immediate physical Command+Q selected `strawberry` through `source=logical-hidden`. The Terminal remained open.
+- **B — explicit Terminal input:** after the same hide/automatic-focus sequence, typing `a` logged `source=keyboard`, selected the distinct disposable Terminal leader, and Command+Q closed that Terminal while Strawberry remained hidden.
+- **C — explicit Brave click:** after hiding Strawberry, a real pointer click logged `source=button` and changed the target to an isolated Brave profile. Command+Q closed only Brave; Strawberry remained hidden.
+- **D — Strawberry alone:** on an otherwise empty workspace, Command+W hid Strawberry and physical Command+Q selected the logical hidden Strawberry and quit it.
+
+Verbose logs identified dynamically discovered XWayKeyz device 14 and real pointer device 11 for this run. No IDs are hard-coded. The disposable Terminal process and isolated Brave profile were removed afterward.
+
 ## Final corrective validation record (2026-09-20)
 
 The dedicated X11 keycodes and explicit intent events were injected through temporary kernel input devices; this exercised the live XInput2/Xorg/xfwm4 path without pretending to repeat the already verified physical Toshy capture. Device IDs were discovered dynamically. All test applications were expendable, Brave used an isolated profile under `/tmp`, and the Terminal test used a separate process and client leader.

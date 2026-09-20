@@ -42,7 +42,7 @@ With more than one meaningful application window, Command+W requests a normal cl
 
 After MacLife hides a final window, xfwm4 may automatically focus another application. A focus change alone does not replace the logical hidden target, so an immediate Command+Q still applies to the application the user just hid. MacLife replaces that target only after confirmed user keyboard or button interaction with another meaningful application. Restore, destruction, marker loss, failed identity/PID validation, and successful quit also clear it. Command+W never uses the logical fallback.
 
-User intent is observed through XInput2 raw events. Keyboard events are accepted only from enabled `XWayKeyz (virtual) Keyboard` slave devices discovered dynamically by name; F13/F14 are explicitly ignored. Button events are accepted from enabled non-XTEST, non-XWayKeyz slave pointers and are resolved after focus settles or before the next lifecycle command. Device hierarchy changes refresh these sets without hard-coded IDs. If intent is ambiguous, MacLife conservatively preserves the hidden logical target.
+User intent is observed through XInput2 raw events. Keyboard events are accepted only from enabled `XWayKeyz (virtual) Keyboard` slave devices discovered dynamically by name. The physical Toshy trace showed keycode 105 (`Control_R`) framing the dedicated F13/F14 event. A small event-order state machine defers that exact precursor and ignores its lifecycle suffix; it does not use a timeout and does not broadly ignore modifiers. F13/F14 and their observed wrapper events therefore preserve the hidden logical target, while any ordinary key immediately confirms the currently focused application. Button events are accepted from enabled non-XTEST, non-XWayKeyz slave pointers and are resolved after focus settles or before the next lifecycle command. Device hierarchy changes refresh these sets without hard-coded IDs. If intent is ambiguous, MacLife conservatively preserves the hidden logical target.
 
 ## Identity strategy
 
@@ -83,7 +83,7 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 
 ## Verification status
 
-Automated tests cover normalization, filtering, transient ownership, multi-window class grouping, distinct-leader boundaries, lifecycle policy (including Thunar), logical-active state transitions, XInput device classification, lifecycle-key exclusion, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
+Automated tests cover normalization, filtering, transient ownership, multi-window class grouping, distinct-leader boundaries, lifecycle policy (including Thunar), logical-active state transitions, XInput device classification, the physical lifecycle-chord state machine (including absent raw releases while the keys are grabbed), and Strawberry fallback revalidation. They do not pretend to emulate an X server.
 
 Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md). Milestone 3's interactive checklist and corrective-pass validation record are in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md).
 

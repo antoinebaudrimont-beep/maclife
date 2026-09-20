@@ -206,16 +206,40 @@ pub fn select_active_target(
     }
 }
 
-pub fn keyboard_confirms_user_intent(keycode: u32, close_keycode: u8, quit_keycode: u8) -> bool {
-    keycode != u32::from(close_keycode) && keycode != u32::from(quit_keycode)
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::input::{KeyPhase, LifecycleChordTracker};
+
     use super::{
-        application_rule, close_decision, keyboard_confirms_user_intent, select_active_target,
-        ActiveTarget, CloseDecision, FocusKind, HiddenWindows, LastWindowAction, QuitMethod,
+        application_rule, close_decision, select_active_target, ActiveTarget, CloseDecision,
+        FocusKind, HiddenWindows, LastWindowAction, QuitMethod,
     };
+
+    fn observe_key(
+        hidden: &mut HiddenWindows,
+        tracker: &mut LifecycleChordTracker,
+        focused_xid: u32,
+        keycode: u32,
+        phase: KeyPhase,
+    ) {
+        if tracker
+            .observe(keycode, phase, 191, 192)
+            .confirms_user_intent()
+        {
+            hidden.confirm_user_focus(focused_xid);
+        }
+    }
+
+    fn lifecycle_sequence(keycode: u32) -> [(u32, KeyPhase); 6] {
+        [
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+            (keycode, KeyPhase::Press),
+            (keycode, KeyPhase::Release),
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+        ]
+    }
 
     #[test]
     fn closes_only_the_focused_window_when_multiple_exist() {
@@ -365,10 +389,54 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_keys_do_not_confirm_new_app_intent() {
-        assert!(!keyboard_confirms_user_intent(191, 191, 192));
-        assert!(!keyboard_confirms_user_intent(192, 191, 192));
-        assert!(keyboard_confirms_user_intent(38, 191, 192));
+    fn physical_quit_chord_does_not_promote_auto_focused_terminal() {
+        let mut hidden = HiddenWindows::default();
+        let mut tracker = LifecycleChordTracker::default();
+        hidden.remember_as_logical(10, "strawberry");
+        for (keycode, phase) in lifecycle_sequence(192) {
+            observe_key(&mut hidden, &mut tracker, 20, keycode, phase);
+        }
+        assert_eq!(
+            select_active_target(&hidden, Some((20, FocusKind::Meaningful))),
+            ActiveTarget::LogicalHidden {
+                xid: 10,
+                identity: "strawberry".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn ordinary_key_promotes_auto_focused_terminal() {
+        let mut hidden = HiddenWindows::default();
+        let mut tracker = LifecycleChordTracker::default();
+        hidden.remember_as_logical(10, "strawberry");
+        observe_key(&mut hidden, &mut tracker, 20, 38, KeyPhase::Press);
+        assert_eq!(
+            select_active_target(&hidden, Some((20, FocusKind::Meaningful))),
+            ActiveTarget::Focused
+        );
+    }
+
+    #[test]
+    fn physical_close_chord_does_not_promote_another_application() {
+        let mut hidden = HiddenWindows::default();
+        let mut tracker = LifecycleChordTracker::default();
+        hidden.remember_as_logical(10, "strawberry");
+        for (keycode, phase) in lifecycle_sequence(191) {
+            observe_key(&mut hidden, &mut tracker, 20, keycode, phase);
+        }
+        assert_eq!(hidden.logical_active(), Some((10, "strawberry")));
+    }
+
+    #[test]
+    fn ordinary_input_without_a_hidden_target_keeps_focused_policy() {
+        let mut hidden = HiddenWindows::default();
+        let mut tracker = LifecycleChordTracker::default();
+        observe_key(&mut hidden, &mut tracker, 20, 38, KeyPhase::Press);
+        assert_eq!(
+            select_active_target(&hidden, Some((20, FocusKind::Meaningful))),
+            ActiveTarget::Focused
+        );
     }
 
     #[test]

@@ -49,7 +49,11 @@ impl IntentDevices {
         let masks = [
             EventMask {
                 deviceid: u16::from(Device::ALL_MASTER),
-                mask: vec![XIEventMask::RAW_KEY_PRESS | XIEventMask::RAW_BUTTON_PRESS],
+                mask: vec![
+                    XIEventMask::RAW_KEY_PRESS
+                        | XIEventMask::RAW_KEY_RELEASE
+                        | XIEventMask::RAW_BUTTON_PRESS,
+                ],
             },
             EventMask {
                 deviceid: u16::from(Device::ALL),
@@ -104,9 +108,161 @@ impl IntentDevices {
     }
 }
 
+/// Toshy emits this key on the XWayKeyz keyboard immediately before and after
+/// the dedicated F13/F14 lifecycle key. It is Control_R on the target XKB map.
+pub const TOSHY_LIFECYCLE_WRAPPER_KEYCODE: u32 = 105;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyPhase {
+    Press,
+    Release,
+}
+
+impl KeyPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Press => "press",
+            Self::Release => "release",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyIntent {
+    User,
+    LifecyclePrecursor,
+    LifecycleClose,
+    LifecycleQuit,
+    LifecycleSuffix,
+    Release,
+}
+
+impl KeyIntent {
+    pub fn confirms_user_intent(self) -> bool {
+        self == Self::User
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::LifecyclePrecursor => "lifecycle-precursor",
+            Self::LifecycleClose => "lifecycle-close",
+            Self::LifecycleQuit => "lifecycle-quit",
+            Self::LifecycleSuffix => "lifecycle-suffix",
+            Self::Release => "release",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ChordState {
+    #[default]
+    Idle,
+    PrecursorDown,
+    PrecursorReleased,
+    LifecycleDown(u32),
+    AwaitingSuffix,
+    SuffixDown,
+}
+
+/// Classifies the observed XWayKeyz sequence without relying on a timer.
+///
+/// The physical trace is wrapper press/release, F13 or F14 press/release, then
+/// wrapper press/release. The first wrapper event must be deferred until the
+/// next key disambiguates it; otherwise it would incorrectly promote the
+/// window xfwm4 focused after MacLife hid the previous application.
+#[derive(Debug, Default)]
+pub struct LifecycleChordTracker {
+    state: ChordState,
+}
+
+impl LifecycleChordTracker {
+    pub fn observe(
+        &mut self,
+        keycode: u32,
+        phase: KeyPhase,
+        close_keycode: u8,
+        quit_keycode: u8,
+    ) -> KeyIntent {
+        let close = u32::from(close_keycode);
+        let quit = u32::from(quit_keycode);
+        let is_lifecycle = keycode == close || keycode == quit;
+        let lifecycle_intent = || {
+            if keycode == close {
+                KeyIntent::LifecycleClose
+            } else {
+                KeyIntent::LifecycleQuit
+            }
+        };
+
+        match (self.state, phase) {
+            (ChordState::Idle, KeyPhase::Press)
+                if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE =>
+            {
+                self.state = ChordState::PrecursorDown;
+                KeyIntent::LifecyclePrecursor
+            }
+            (ChordState::PrecursorDown, KeyPhase::Release)
+                if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE =>
+            {
+                self.state = ChordState::PrecursorReleased;
+                KeyIntent::LifecyclePrecursor
+            }
+            (ChordState::PrecursorDown | ChordState::PrecursorReleased, KeyPhase::Press)
+                if is_lifecycle =>
+            {
+                self.state = ChordState::LifecycleDown(keycode);
+                lifecycle_intent()
+            }
+            (ChordState::LifecycleDown(active), KeyPhase::Release) if keycode == active => {
+                self.state = ChordState::AwaitingSuffix;
+                if keycode == close {
+                    KeyIntent::LifecycleClose
+                } else {
+                    KeyIntent::LifecycleQuit
+                }
+            }
+            (ChordState::LifecycleDown(_) | ChordState::AwaitingSuffix, KeyPhase::Press)
+                if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE =>
+            {
+                self.state = ChordState::SuffixDown;
+                KeyIntent::LifecycleSuffix
+            }
+            (ChordState::SuffixDown, KeyPhase::Release)
+                if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE =>
+            {
+                self.state = ChordState::Idle;
+                KeyIntent::LifecycleSuffix
+            }
+            (ChordState::Idle, KeyPhase::Press) if is_lifecycle => {
+                self.state = ChordState::LifecycleDown(keycode);
+                lifecycle_intent()
+            }
+            (ChordState::LifecycleDown(_) | ChordState::AwaitingSuffix, KeyPhase::Press)
+                if is_lifecycle =>
+            {
+                self.state = ChordState::LifecycleDown(keycode);
+                lifecycle_intent()
+            }
+            (_, KeyPhase::Press) => {
+                self.state = if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE {
+                    ChordState::PrecursorDown
+                } else {
+                    ChordState::Idle
+                };
+                KeyIntent::User
+            }
+            (_, KeyPhase::Release) => KeyIntent::Release,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{device_role, DeviceRole};
+    use super::{
+        device_role, DeviceRole, KeyIntent, KeyPhase, LifecycleChordTracker,
+        TOSHY_LIFECYCLE_WRAPPER_KEYCODE,
+    };
     use x11rb::protocol::xinput::DeviceType;
 
     #[test]
@@ -151,5 +307,80 @@ mod tests {
             ),
             DeviceRole::Ignore
         );
+    }
+
+    fn classify(sequence: &[(u32, KeyPhase)]) -> Vec<KeyIntent> {
+        let mut tracker = LifecycleChordTracker::default();
+        sequence
+            .iter()
+            .map(|(keycode, phase)| tracker.observe(*keycode, *phase, 191, 192))
+            .collect()
+    }
+
+    #[test]
+    fn physical_close_sequence_never_confirms_user_intent() {
+        let sequence = [
+            (TOSHY_LIFECYCLE_WRAPPER_KEYCODE, KeyPhase::Press),
+            (TOSHY_LIFECYCLE_WRAPPER_KEYCODE, KeyPhase::Release),
+            (191, KeyPhase::Press),
+            (191, KeyPhase::Release),
+            (TOSHY_LIFECYCLE_WRAPPER_KEYCODE, KeyPhase::Press),
+            (TOSHY_LIFECYCLE_WRAPPER_KEYCODE, KeyPhase::Release),
+        ];
+        assert!(classify(&sequence)
+            .into_iter()
+            .all(|intent| !intent.confirms_user_intent()));
+    }
+
+    #[test]
+    fn physical_quit_sequence_never_confirms_user_intent() {
+        let sequence = [
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+            (192, KeyPhase::Press),
+            (192, KeyPhase::Release),
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+        ];
+        assert!(classify(&sequence)
+            .into_iter()
+            .all(|intent| !intent.confirms_user_intent()));
+    }
+
+    #[test]
+    fn ordinary_key_and_disambiguated_wrapper_confirm_user_intent() {
+        assert_eq!(
+            classify(&[(38, KeyPhase::Press)]),
+            vec![KeyIntent::User]
+        );
+        assert_eq!(
+            classify(&[
+                (105, KeyPhase::Press),
+                (105, KeyPhase::Release),
+                (38, KeyPhase::Press),
+            ]),
+            vec![
+                KeyIntent::LifecyclePrecursor,
+                KeyIntent::LifecyclePrecursor,
+                KeyIntent::User,
+            ]
+        );
+    }
+
+    #[test]
+    fn grabbed_lifecycle_keys_do_not_require_a_raw_release() {
+        let sequence = [
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+            (191, KeyPhase::Press),
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+            (192, KeyPhase::Press),
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+        ];
+        assert!(classify(&sequence)
+            .into_iter()
+            .all(|intent| !intent.confirms_user_intent()));
     }
 }
