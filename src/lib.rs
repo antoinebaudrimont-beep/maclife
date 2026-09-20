@@ -8,6 +8,8 @@ pub mod model;
 pub mod process;
 pub mod report;
 pub mod runtime;
+pub mod signals;
+pub mod singleton;
 pub mod x11;
 
 use std::error::Error;

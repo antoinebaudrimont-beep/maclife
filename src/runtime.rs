@@ -6,7 +6,11 @@ use crate::lifecycle::{
     QuitMethod,
 };
 use crate::model::{Disposition, Inspection, Snapshot, WindowFacts};
+use crate::signals::ShutdownSignals;
+use crate::singleton::{AcquireResult, SingletonGuard};
 use crate::{process, report, x11, DynError};
+use std::io::ErrorKind;
+use std::os::fd::AsRawFd;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -15,6 +19,7 @@ use x11rb::protocol::xproto::{
     ChangeWindowAttributesAux, ConnectionExt, EventMask, GrabMode, ModMask,
 };
 use x11rb::protocol::Event;
+use x11rb::rust_connection::RustConnection;
 
 pub const DEFAULT_CLOSE_KEYCODE: u8 = 191;
 pub const DEFAULT_QUIT_KEYCODE: u8 = 192;
@@ -75,6 +80,15 @@ fn is_actually_hidden(window: &WindowFacts) -> bool {
             .any(|state| state == "_NET_WM_STATE_HIDDEN")
 }
 
+fn is_adoptable_hidden(window: &WindowFacts) -> bool {
+    window.maclife_hidden
+        && is_actually_hidden(window)
+        && identity::disposition(window) == Disposition::Meaningful
+        && normalized_app_identity(window) != "unknown"
+        && (window.wm_class.is_some()
+            || (window.pid_validated && window.process.is_some()))
+}
+
 fn reconcile_hidden(hidden: &mut HiddenWindows, snapshot: &Snapshot) {
     for window in snapshot
         .windows
@@ -88,17 +102,33 @@ fn reconcile_hidden(hidden: &mut HiddenWindows, snapshot: &Snapshot) {
             );
         }
     }
+    for window in snapshot
+        .windows
+        .iter()
+        .filter(|window| {
+            window.maclife_hidden
+                && is_actually_hidden(window)
+                && !is_adoptable_hidden(window)
+        })
+    {
+        if let Err(error) = control::clear_hidden_marker(window.xid) {
+            eprintln!(
+                "MacLife: could not clear invalid hidden marker on 0x{:08x}: {error}",
+                window.xid
+            );
+        }
+    }
     let marked: Vec<_> = snapshot
         .windows
         .iter()
-        .filter(|window| window.maclife_hidden && is_actually_hidden(window))
+        .filter(|window| is_adoptable_hidden(window))
         .map(|window| window.xid)
         .collect();
     hidden.retain_marked(&marked);
     for window in snapshot
         .windows
         .iter()
-        .filter(|window| window.maclife_hidden && is_actually_hidden(window))
+        .filter(|window| is_adoptable_hidden(window))
     {
         hidden.adopt(window.xid, normalized_app_identity(window));
     }
@@ -631,10 +661,135 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
     result
 }
 
+fn handle_event(
+    conn: &RustConnection,
+    event: Event,
+    root: u32,
+    active_window_atom: u32,
+    intent_devices: &mut IntentDevices,
+    chord_tracker: &mut LifecycleChordTracker,
+    hidden: &mut HiddenWindows,
+    options: RunOptions,
+) {
+    match event {
+        Event::KeyPress(event) => {
+            let result = if event.detail == options.close_keycode {
+                handle_close(options, hidden)
+            } else if event.detail == options.quit_keycode {
+                handle_quit(options, hidden)
+            } else {
+                return;
+            };
+            if let Err(error) = result {
+                eprintln!("MacLife action refused/failed: {error}");
+            }
+        }
+        Event::PropertyNotify(event)
+            if event.window == root && event.atom == active_window_atom =>
+        {
+            if let Ok(snapshot) = x11::collect_snapshot() {
+                observe_focus(hidden, &snapshot, options.verbose);
+            }
+        }
+        Event::XinputRawKeyPress(event)
+            if intent_devices.is_toshy_keyboard(event.sourceid) =>
+        {
+            observe_keyboard_intent(
+                hidden,
+                chord_tracker,
+                event.detail,
+                KeyPhase::Press,
+                event.sourceid,
+                options,
+            );
+        }
+        Event::XinputRawKeyRelease(event)
+            if intent_devices.is_toshy_keyboard(event.sourceid) =>
+        {
+            observe_keyboard_intent(
+                hidden,
+                chord_tracker,
+                event.detail,
+                KeyPhase::Release,
+                event.sourceid,
+                options,
+            );
+        }
+        Event::XinputRawButtonPress(event)
+            if intent_devices.is_user_pointer(event.sourceid) =>
+        {
+            if hidden.logical_active().is_some() {
+                hidden.note_pointer_intent();
+                if options.verbose {
+                    println!(
+                        "user-intent source=button pending-focus-confirmation sourceid={}",
+                        event.sourceid
+                    );
+                }
+            }
+        }
+        Event::XinputHierarchy(_) => {
+            if let Err(error) = intent_devices.refresh(conn) {
+                eprintln!("MacLife XInput device refresh failed: {error}");
+            } else if options.verbose {
+                println!("XInput devices refreshed: {}", intent_devices.summary());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn wait_for_x_or_shutdown(
+    conn: &RustConnection,
+    signals: &ShutdownSignals,
+) -> Result<bool, DynError> {
+    let mut descriptors = [
+        libc::pollfd {
+            fd: conn.stream().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: signals.read_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: descriptors points to two initialized pollfd values for the
+        // duration of this blocking call.
+        let result = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, -1) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
+        }
+        if descriptors[1].revents & libc::POLLIN != 0 && signals.consume()? {
+            return Ok(false);
+        }
+        if descriptors[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err("X11 connection was lost".into());
+        }
+        if descriptors[0].revents & libc::POLLIN != 0 {
+            return Ok(true);
+        }
+    }
+}
+
 pub fn run(options: RunOptions) -> Result<(), DynError> {
     if options.close_keycode == options.quit_keycode {
         return Err("close and quit keycodes must differ".into());
     }
+    let _singleton = match SingletonGuard::acquire()? {
+        AcquireResult::Acquired(guard) => guard,
+        AcquireResult::AlreadyRunning => {
+            println!("MacLife already running; refusing second instance");
+            return Ok(());
+        }
+    };
+    let shutdown_signals = ShutdownSignals::install()?;
     let (conn, screen_number) = x11rb::connect(None)?;
     let root = conn
         .setup()
@@ -687,7 +842,7 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
         reconcile_hidden(&mut hidden, &snapshot);
     }
     println!(
-        "MacLife listening: close_keycode={} quit_keycode={} dry_run={} adopted_hidden={} {}",
+        "MacLife started: close_keycode={} quit_keycode={} dry_run={} adopted_hidden={} {}",
         options.close_keycode,
         options.quit_keycode,
         options.dry_run,
@@ -696,73 +851,24 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
     );
 
     loop {
-        match conn.wait_for_event()? {
-            Event::KeyPress(event) => {
-                let result = if event.detail == options.close_keycode {
-                    handle_close(options, &mut hidden)
-                } else if event.detail == options.quit_keycode {
-                    handle_quit(options, &mut hidden)
-                } else {
-                    continue;
-                };
-                if let Err(error) = result {
-                    eprintln!("MacLife action refused/failed: {error}");
-                }
-            }
-            Event::PropertyNotify(event)
-                if event.window == root && event.atom == active_window_atom =>
-            {
-                if let Ok(snapshot) = x11::collect_snapshot() {
-                    observe_focus(&mut hidden, &snapshot, options.verbose);
-                }
-            }
-            Event::XinputRawKeyPress(event)
-                if intent_devices.is_toshy_keyboard(event.sourceid) =>
-            {
-                observe_keyboard_intent(
-                    &mut hidden,
-                    &mut chord_tracker,
-                    event.detail,
-                    KeyPhase::Press,
-                    event.sourceid,
-                    options,
-                );
-            }
-            Event::XinputRawKeyRelease(event)
-                if intent_devices.is_toshy_keyboard(event.sourceid) =>
-            {
-                observe_keyboard_intent(
-                    &mut hidden,
-                    &mut chord_tracker,
-                    event.detail,
-                    KeyPhase::Release,
-                    event.sourceid,
-                    options,
-                );
-            }
-            Event::XinputRawButtonPress(event)
-                if intent_devices.is_user_pointer(event.sourceid) =>
-            {
-                if hidden.logical_active().is_some() {
-                    hidden.note_pointer_intent();
-                    if options.verbose {
-                        println!(
-                            "user-intent source=button pending-focus-confirmation sourceid={}",
-                            event.sourceid
-                        );
-                    }
-                }
-            }
-            Event::XinputHierarchy(_) => {
-                if let Err(error) = intent_devices.refresh(&conn) {
-                    eprintln!("MacLife XInput device refresh failed: {error}");
-                } else if options.verbose {
-                    println!("XInput devices refreshed: {}", intent_devices.summary());
-                }
-            }
-            _ => {}
+        while let Some(event) = conn.poll_for_event()? {
+            handle_event(
+                &conn,
+                event,
+                root,
+                active_window_atom,
+                &mut intent_devices,
+                &mut chord_tracker,
+                &mut hidden,
+                options,
+            );
+        }
+        if !wait_for_x_or_shutdown(&conn, &shutdown_signals)? {
+            break;
         }
     }
+    println!("MacLife stopping: received termination signal");
+    Ok(())
 }
 
 fn select_restore_candidate(windows: &[WindowFacts], wanted: &str) -> Result<u32, String> {
@@ -814,7 +920,10 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{generic_process_pid, revalidate_same_process, select_restore_candidate};
+    use super::{
+        generic_process_pid, is_adoptable_hidden, revalidate_same_process,
+        select_restore_candidate,
+    };
     use crate::identity;
     use crate::model::{ProcessInfo, WindowFacts};
 
@@ -918,5 +1027,26 @@ mod tests {
         let mut second = hidden.clone();
         second.xid = 30;
         assert!(select_restore_candidate(&[hidden, second], "featherpad").is_err());
+    }
+
+    #[test]
+    fn restart_adopts_only_stable_meaningful_hidden_windows() {
+        let mut valid = WindowFacts::test_window(10, "FeatherPad");
+        valid.maclife_hidden = true;
+        valid.mapped = false;
+        assert!(is_adoptable_hidden(&valid));
+
+        let mut visible = valid.clone();
+        visible.mapped = true;
+        assert!(!is_adoptable_hidden(&visible));
+
+        let mut unknown = WindowFacts::test_window(20, "");
+        unknown.maclife_hidden = true;
+        unknown.mapped = false;
+        assert!(!is_adoptable_hidden(&unknown));
+
+        let mut desktop = valid;
+        desktop.window_types = vec!["_NET_WM_WINDOW_TYPE_DESKTOP".to_string()];
+        assert!(!is_adoptable_hidden(&desktop));
     }
 }
