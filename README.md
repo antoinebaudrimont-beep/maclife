@@ -34,11 +34,13 @@ Verbose mode adds one line for every managed client, explaining whether it was m
 | Brave Origin | Iconify and mark for explicit restore | SIGTERM to the exact validated PID |
 | Brave Browser | Iconify and mark for explicit restore | SIGTERM to the exact validated PID |
 | ChatGPT | Native close | SIGTERM to the exact validated PID |
-| Thunar | Native close | `thunar --quit` |
+| Thunar | Iconify and mark for explicit restore | `thunar --quit` |
 | XFCE Terminal | Native close | `WM_DELETE_WINDOW` for each grouped meaningful window |
 | Unknown application | Refuse the last-window action | Refuse |
 
 With more than one meaningful application window, Command+W requests a normal close of the focused window. A focused attached dialog is closed normally and never causes its owner to be hidden. Restore acts only on a window bearing MacLife's private hidden marker and refuses ambiguous matches.
+
+After MacLife hides a final window, an excluded focus target such as xfdesktop may replace it. In that narrow state, Command+Q targets the most recently MacLife-hidden application. The fallback is cleared when another meaningful application gains focus, the hidden window is restored or destroyed, its marker/identity/process validation fails, or the application is explicitly quit. Command+W never uses this fallback.
 
 ## Identity strategy
 
@@ -79,9 +81,9 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 
 ## Verification status
 
-Automated tests cover normalization, filtering, transient ownership, multi-window class grouping, distinct-leader boundaries, lifecycle policy, hidden-window bookkeeping, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
+Automated tests cover normalization, filtering, transient ownership, multi-window class grouping, distinct-leader boundaries, lifecycle policy (including Thunar), logical-active hidden-window bookkeeping, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
 
-Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md). Milestone 3's remaining interactive validation is listed in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md).
+Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md). Milestone 3's interactive checklist and corrective-pass validation record are in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md).
 
 ## Milestone boundary
 
