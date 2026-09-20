@@ -89,6 +89,9 @@ fn validate_runtime_dir(path: &Path) -> Result<(), DynError> {
     if metadata.uid() != current_uid() {
         return Err(format!("XDG_RUNTIME_DIR {} is not owned by this user", path.display()).into());
     }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!("XDG_RUNTIME_DIR {} is not private", path.display()).into());
+    }
     Ok(())
 }
 
@@ -189,5 +192,12 @@ mod tests {
         assert_eq!(guard.path(), lock_dir.join("daemon.lock"));
         let contents = fs::read_to_string(guard.path()).expect("pid contents");
         assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn unsafe_runtime_directory_is_refused() {
+        let runtime = TestDir::new("unsafe-runtime");
+        fs::set_permissions(&runtime.0, fs::Permissions::from_mode(0o755)).expect("permissions");
+        assert!(SingletonGuard::acquire_in(&runtime.0).is_err());
     }
 }

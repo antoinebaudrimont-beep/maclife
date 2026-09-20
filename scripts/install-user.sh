@@ -6,7 +6,7 @@ repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 timestamp=$(date +%Y%m%d-%H%M%S)
 start_service=true
 
-if [ "${1:-}" = "--no-start" ]; then
+if [ "$#" -eq 1 ] && [ "$1" = "--no-start" ]; then
     start_service=false
 elif [ "$#" -ne 0 ]; then
     printf '%s\n' "Usage: $0 [--no-start]" >&2
