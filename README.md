@@ -144,6 +144,10 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 - A dialog that omits `WM_TRANSIENT_FOR` is still attached when it advertises `_NET_WM_WINDOW_TYPE_DIALOG`; ownership then falls back to class/leader evidence.
 - An unusual user-facing utility window is intentionally excluded in Milestone 2. A later configuration layer may need a per-application opt-in.
 - Minimized/hidden normal windows remain meaningful and are counted. Mapping state is reported rather than used as an identity filter.
+- Thunderbird tabs are internal application objects, not X11 windows. Its window identity is `thunderbird-default` while the local executable identity is `thunderbird-bin`; generic Command+W therefore operates on the window rather than an individual mail tab, and generic Command+Q safely refuses the process mismatch.
+- GIMP 3 exposes `gimp` as its window identity and `gimp-3-0` as its executable identity. LibreOffice exposes module-specific window identities such as `libreoffice-writer` and `libreoffice-calc` while sharing `soffice-bin`. Generic quit refuses both mismatches instead of inventing an application/process association.
+- A Brave-installed Spotify web app exposes a `spotifyweb` window backed by `brave-browser`. Killing that browser PID could affect unrelated Brave applications or windows, so MacLife refuses generic quit. Safe handling would require a narrow native/PWA-aware lifecycle mechanism.
+- These observed application-specific gaps require narrow adapters or an explicit override architecture in a later milestone. They are not addressed by weakening same-user PID validation or recursively killing helper/process trees.
 
 ## Verification status
 

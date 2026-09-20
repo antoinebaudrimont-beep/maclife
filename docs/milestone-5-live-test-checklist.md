@@ -55,4 +55,14 @@ Same-session validation on 2026-09-20:
 
 Final automated validation: 50 tests passed with warnings denied. The warning-clean release build, POSIX shell syntax checks, and `git diff --check` all passed. `rustfmt`/`cargo fmt` remains unavailable on this system and was not installed solely for this milestone.
 
-Pending: the required real reboot/login validation and a post-login physical Cmd+W/Cmd+Q check. It must not be reported as complete until observed after a real login.
+Reboot/login validation on 2026-09-20:
+
+- After a real reboot and XFCE login, `maclife.service` was active as PID 2333 at 21:20:49 without a manual MacLife or Cargo command. It had zero restarts and the repository remained clean and synchronized.
+- MacLife started before Toshy had created XWayKeyz and logged conservative keyboard intent with an empty keyboard set. XWayKeyz devices 13/14 appeared later.
+- A physical Cmd+W on a newly opened blank FeatherPad window was received after that late device creation. MacLife hid XID `0x06000007`, retained PID 5667, and set `_MACLIFE_HIDDEN=1` plus `_NET_WM_STATE_HIDDEN`. This confirms dynamic XInput hierarchy refresh after login ordering.
+- The subsequent physical Cmd+Q reached the validated generic quit path and removed FeatherPad. MacLife remained on its original login PID with zero restarts.
+- The user then exercised the applications shown in Plank. The journal records successful lifecycle actions for XFCE Task Manager, Brave Origin, GNOME Calendar, KeePassXC, Code, TeXstudio, Inkscape, Shotwell, and Brave Browser; the user reported the remaining displayed applications working as well.
+- Thunderbird tab close is not represented by an X11 window, so generic Command+W hid its final meaningful window rather than closing an internal mail tab. Command+Q safely refused `thunderbird-default` versus `thunderbird-bin` identity evidence.
+- GIMP and LibreOffice quit were safely refused for `gimp` versus `gimp-3-0` and module-specific LibreOffice identities versus `soffice-bin`. The Brave-installed Spotify app was refused because its `spotifyweb` window was backed by `brave-browser`, where PID termination could affect unrelated browser applications.
+
+Milestone 5 automatic startup, late Toshy discovery, physical generic lifecycle control, restart recovery, and same-session hidden-window adoption are validated. The newly observed application-specific tab and quit associations are recorded as later adapter/override work; generic safety was not weakened to force them.
