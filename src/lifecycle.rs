@@ -510,6 +510,25 @@ mod tests {
     }
 
     #[test]
+    fn physical_close_window_chord_does_not_promote_another_application() {
+        let mut hidden = HiddenWindows::default();
+        let mut tracker = LifecycleChordTracker::default();
+        hidden.remember_as_logical(10, "strawberry");
+        let physical_trace = [
+            (50, KeyPhase::Press),
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+            (50, KeyPhase::Release),
+            (195, KeyPhase::Press),
+            (195, KeyPhase::Release),
+        ];
+        for (keycode, phase) in physical_trace {
+            observe_key(&mut hidden, &mut tracker, 20, keycode, phase);
+        }
+        assert_eq!(hidden.logical_active(), Some((10, "strawberry")));
+    }
+
+    #[test]
     fn ordinary_input_without_a_hidden_target_keeps_focused_policy() {
         let mut hidden = HiddenWindows::default();
         let mut tracker = LifecycleChordTracker::default();

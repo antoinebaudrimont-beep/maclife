@@ -109,8 +109,9 @@ impl IntentDevices {
 }
 
 /// Toshy emits this key on the XWayKeyz keyboard immediately before and after
-/// the dedicated F13/F14 lifecycle key. It is Control_R on the target XKB map.
+/// F13/F14. Shift+Command+W emits it before F17 while Shift_L is held.
 pub const TOSHY_LIFECYCLE_WRAPPER_KEYCODE: u32 = 105;
+pub const TOSHY_LIFECYCLE_SHIFT_KEYCODE: u32 = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyPhase {
@@ -160,6 +161,10 @@ impl KeyIntent {
 enum ChordState {
     #[default]
     Idle,
+    ShiftDown,
+    ShiftWrapperDown,
+    ShiftWrapperReleased,
+    ShiftReleased,
     PrecursorDown,
     PrecursorReleased,
     LifecycleDown(u32),
@@ -169,10 +174,10 @@ enum ChordState {
 
 /// Classifies the observed XWayKeyz sequence without relying on a timer.
 ///
-/// The physical trace is wrapper press/release, F13 or F14 press/release, then
-/// wrapper press/release. The first wrapper event must be deferred until the
-/// next key disambiguates it; otherwise it would incorrectly promote the
-/// window xfwm4 focused after MacLife hid the previous application.
+/// F13/F14 use wrapper press/release around the lifecycle key. The physical F17
+/// trace is Shift press, wrapper press/release, Shift release, then F17. These
+/// potential precursor events are deferred until a later key disambiguates
+/// them so they cannot promote the window xfwm4 focused after a lifecycle act.
 #[derive(Debug, Default)]
 pub struct LifecycleChordTracker {
     state: ChordState,
@@ -202,6 +207,40 @@ impl LifecycleChordTracker {
         };
 
         match (self.state, phase) {
+            (ChordState::Idle, KeyPhase::Press)
+                if keycode == TOSHY_LIFECYCLE_SHIFT_KEYCODE =>
+            {
+                self.state = ChordState::ShiftDown;
+                KeyIntent::LifecyclePrecursor
+            }
+            (ChordState::ShiftDown, KeyPhase::Press)
+                if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE =>
+            {
+                self.state = ChordState::ShiftWrapperDown;
+                KeyIntent::LifecyclePrecursor
+            }
+            (ChordState::ShiftWrapperDown, KeyPhase::Release)
+                if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE =>
+            {
+                self.state = ChordState::ShiftWrapperReleased;
+                KeyIntent::LifecyclePrecursor
+            }
+            (ChordState::ShiftWrapperReleased, KeyPhase::Release)
+                if keycode == TOSHY_LIFECYCLE_SHIFT_KEYCODE =>
+            {
+                self.state = ChordState::ShiftReleased;
+                KeyIntent::LifecyclePrecursor
+            }
+            (ChordState::ShiftReleased, KeyPhase::Press) if keycode == close_window => {
+                self.state = ChordState::LifecycleDown(keycode);
+                KeyIntent::LifecycleCloseWindow
+            }
+            (ChordState::ShiftDown, KeyPhase::Release)
+                if keycode == TOSHY_LIFECYCLE_SHIFT_KEYCODE =>
+            {
+                self.state = ChordState::Idle;
+                KeyIntent::Release
+            }
             (ChordState::Idle, KeyPhase::Press)
                 if keycode == TOSHY_LIFECYCLE_WRAPPER_KEYCODE =>
             {
@@ -269,7 +308,7 @@ impl LifecycleChordTracker {
 mod tests {
     use super::{
         device_role, DeviceRole, KeyIntent, KeyPhase, LifecycleChordTracker,
-        TOSHY_LIFECYCLE_WRAPPER_KEYCODE,
+        TOSHY_LIFECYCLE_SHIFT_KEYCODE, TOSHY_LIFECYCLE_WRAPPER_KEYCODE,
     };
     use x11rb::protocol::xinput::DeviceType;
 
@@ -358,12 +397,12 @@ mod tests {
     #[test]
     fn physical_close_window_sequence_never_confirms_user_intent() {
         let sequence = [
+            (TOSHY_LIFECYCLE_SHIFT_KEYCODE, KeyPhase::Press),
             (105, KeyPhase::Press),
             (105, KeyPhase::Release),
+            (TOSHY_LIFECYCLE_SHIFT_KEYCODE, KeyPhase::Release),
             (195, KeyPhase::Press),
             (195, KeyPhase::Release),
-            (105, KeyPhase::Press),
-            (105, KeyPhase::Release),
         ];
         let intents = classify(&sequence);
         assert!(intents
@@ -372,6 +411,29 @@ mod tests {
         assert!(intents.contains(&KeyIntent::LifecycleCloseWindow));
         assert!(!intents.contains(&KeyIntent::LifecycleClose));
         assert!(!intents.contains(&KeyIntent::LifecycleQuit));
+    }
+
+    #[test]
+    fn ordinary_shift_use_still_confirms_on_the_non_lifecycle_key() {
+        assert_eq!(
+            classify(&[
+                (TOSHY_LIFECYCLE_SHIFT_KEYCODE, KeyPhase::Press),
+                (38, KeyPhase::Press),
+            ]),
+            vec![KeyIntent::LifecyclePrecursor, KeyIntent::User]
+        );
+        assert_eq!(
+            classify(&[
+                (TOSHY_LIFECYCLE_SHIFT_KEYCODE, KeyPhase::Press),
+                (TOSHY_LIFECYCLE_SHIFT_KEYCODE, KeyPhase::Release),
+                (38, KeyPhase::Press),
+            ]),
+            vec![
+                KeyIntent::LifecyclePrecursor,
+                KeyIntent::Release,
+                KeyIntent::User,
+            ]
+        );
     }
 
     #[test]
