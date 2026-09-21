@@ -1,0 +1,4 @@
+#!/bin/sh
+GNOME_ACCESSIBILITY=1
+export GNOME_ACCESSIBILITY
+exec /usr/bin/thunderbird "$@"
