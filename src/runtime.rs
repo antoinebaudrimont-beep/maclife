@@ -875,7 +875,9 @@ fn handle_event(
     options: RunOptions,
 ) {
     match event {
-        Event::KeyPress(event) => {
+        // Execute on release so a native shortcut is never injected while the
+        // dedicated Toshy function key is still part of the X11 key state.
+        Event::KeyRelease(event) => {
             let result = if event.detail == options.close_keycode {
                 handle_close(options, hidden, document_provider)
             } else if event.detail == options.quit_keycode {
