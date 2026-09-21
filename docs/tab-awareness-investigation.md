@@ -185,8 +185,10 @@ delivering an application shortcut. Toshy was not modified here.
 The desktop-wide accessibility setting was and remains false.
 
 - Brave Browser and Brave Origin need Chromium accessibility enabled at launch
-  for reliable tab exposure in this environment. The tested mechanism was
-  `--force-renderer-accessibility`.
+  for reliable tab exposure in this environment. Milestone 6.1 subsequently
+  verified the narrower `--force-renderer-accessibility=basic` mode with one
+  and three tabs, so the managed launchers use that mode rather than complete
+  renderer accessibility.
 - Thunderbird needs accessibility enabled before startup. The tested per-process
   mechanism was `GNOME_ACCESSIBILITY=1`; the ordinary relaunch did not appear on
   AT-SPI.
@@ -199,8 +201,8 @@ Mozilla's ATK platform source documents `GNOME_ACCESSIBILITY`, the AT-SPI bus
 check, and the GNOME `toolkit-accessibility` fallback in
 [Platform.cpp](https://searchfox.org/firefox-main/source/accessible/atk/Platform.cpp).
 
-The implementation phase must decide how to opt these applications into
-accessibility without silently imposing a desktop-global setting.
+Milestone 6.1 implements this with reversible user desktop overrides and narrow
+per-application wrappers. The desktop-global setting remains false.
 
 ## 10. Resource and performance implications
 

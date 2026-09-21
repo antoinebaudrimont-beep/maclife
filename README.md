@@ -2,7 +2,7 @@
 
 MacLife is an experimental macOS-style application lifecycle project for MX Linux/XFCE on X11.
 
-This repository contains **Milestone 6**: a reliable XFCE/X11 user-session daemon with a conservative compatibility-adapter layer around the generic lifecycle engine. MacLife installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
+This repository contains **Milestone 6.1**: a reliable XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, and Thunderbird. MacLife installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
 
 ## Install for the current user
 
@@ -16,10 +16,14 @@ The installer builds an optimized binary, then installs only user-owned files:
 
 - `~/.local/bin/maclife`
 - `~/.local/libexec/maclife-session-start`
+- `~/.local/libexec/maclife-brave-browser`
+- `~/.local/libexec/maclife-brave-origin`
+- `~/.local/libexec/maclife-thunderbird`
 - `~/.config/systemd/user/maclife.service`
 - `~/.config/autostart/maclife.desktop`
+- user-level desktop overrides for Brave Browser, Brave Origin, and Thunderbird
 
-If a destination already contains different content, the installer first creates a timestamped backup next to it. It starts MacLife immediately when invoked from an active X11 session; use `./scripts/install-user.sh --no-start` to defer startup until the next XFCE login. No root access is used.
+If a destination already contains different content, the installer first creates a timestamped backup next to it. Original user desktop launchers are also recorded in `~/.local/share/maclife/launcher-backups` and restored by the uninstaller; vendor files in `/usr/share/applications` are never modified. It starts MacLife immediately when invoked from an active X11 session; use `./scripts/install-user.sh --no-start` to defer startup until the next XFCE login. No root access is used.
 
 The XFCE autostart entry runs a small session bridge. It verifies X11, imports the live `DISPLAY`, `XAUTHORITY`, desktop, and D-Bus variables into the systemd user manager, clears any previous rate-limit failure, and starts `maclife.service`. There is no startup sleep. MacLife does not depend on Toshy's service: it can start before Toshy's virtual keyboard appears and dynamically refreshes XInput devices when Toshy starts or restarts.
 
@@ -64,7 +68,7 @@ The normal report includes the focused XID, title, normalized application identi
 
 Verbose mode adds one line for every managed client, explaining whether it was meaningful, attached, or excluded and which grouping rule matched it to the focused application.
 
-`run` passively grabs the dedicated X11 keycodes 191 and 192. The Toshy mapping, active configuration path, and backup path are documented in [docs/toshy-control-channel.md](docs/toshy-control-channel.md). The installed service runs the equivalent of `maclife run`; manual `cargo run -- run` is only for development and will refuse while the service owns the singleton lock. Always use `--dry-run` first during development: it logs the selected action but never closes, hides, quits, or restores a window.
+`run` passively grabs the dedicated X11 keycodes 191, 192, and 195. The Toshy mapping, active configuration path, and backup path are documented in [docs/toshy-control-channel.md](docs/toshy-control-channel.md). The installed service runs the equivalent of `maclife run`; manual `cargo run -- run` is only for development and will refuse while the service owns the singleton lock. Always use `--dry-run` first during development: it logs the selected action but never closes, hides, quits, or restores a window.
 
 ## Daemon reliability model
 
@@ -80,6 +84,7 @@ Normal service logs contain startup, shutdown, lifecycle actions, refusals, and 
 
 | Policy class | Command+W with 2+ meaningful windows | Command+W on final window | Command+Q |
 |---|---|---|---|
+| Supported internal-document application | Close the active native tab/document when its per-window count exceeds the persistent minimum | Iconify and mark the top-level window | Existing validated application quit adapter |
 | Ordinary generic application | Close focused window with `WM_DELETE_WINDOW` | Iconify and mark for restore | Revalidated same-user SIGTERM only when one safe application PID is established |
 | Dedicated quit adapter | Close focused window | Iconify and mark | Application API first; narrowly scoped fallback where documented |
 | Native lifecycle application | Close focused window | Native close | Proven application-level process action |
@@ -88,6 +93,21 @@ Normal service logs contain startup, shutdown, lifecycle actions, refusals, and 
 | Ambiguous identity/process association | Refuse when window identity is unsafe | Refuse | Refuse rather than guess |
 
 The default is no longer a list of known application names. Any meaningful normal window with a stable normalized identity and acceptable class or validated-process evidence receives the ordinary generic policy. FeatherPad and Galculator were validated without application-specific rules.
+
+For Brave Browser, Brave Origin, and Thunderbird, Command+W first asks an AT-SPI internal-document provider about the focused X11 window. A known count above the application's persistent minimum invokes native `Ctrl+W`, allowing the application to retain confirmation and protected-state authority. A known final/base state uses MacLife's ordinary hidden-window marker. Missing accessibility, a failed query, multiple matching frames, a missing selected tab, or any other ambiguous association refuses rather than forwarding a potentially destructive native close.
+
+Shift+Command+W is a separate top-level-window operation. Brave performs native `Ctrl+Shift+W`; Thunderbird and other ordinary X11 clients receive `WM_DELETE_WINDOW`. It is never interpreted as Command+W or Command+Q.
+
+### Internal-document accessibility
+
+The installer creates user-level desktop overrides that preserve every vendor launcher argument while routing normal launches through narrow wrappers:
+
+- Brave Browser and Brave Origin use Chromium's documented `--force-renderer-accessibility=basic` mode. This exposes the browser tab strip without requesting the complete web-content tree.
+- Thunderbird receives `GNOME_ACCESSIBILITY=1` only in its process environment.
+
+The desktop-global `toolkit-accessibility` setting is not changed. Already-running or manually launched unopted instances remain supported only when they expose healthy AT-SPI state; otherwise Command+W refuses with a relaunch explanation. Custom Brave PWA desktop files are not rewritten. Spotify remains a distinct window-only lifecycle identity and cannot become a browser-tab or process-signal target.
+
+MacLife performs bounded discovery only on a lifecycle command, then caches the matched bus/frame/tab-list identifiers for the X11 window. Cached Brave commands query only the known frame and tab-list subtree. Thunderbird's hidden one-tab strip is recognized as `BaseOnly` only after matching a healthy Mail frame; a generic missing tab list is never treated as one. There is no polling loop.
 
 Narrow exceptions remain because their implementation is safer than the generic mechanism:
 
@@ -105,7 +125,7 @@ X11 has no universal application-level Quit protocol. For an ordinary generic ap
 
 ### Compatibility adapters
 
-The generic validator remains unchanged. A small centralized registry handles known cases where live X11 window identity and executable identity differ. Adapters do not redefine Command+W semantics. They prove an exact relationship from a listed window identity to a listed process identity, while retaining local PID, same-user, fresh `/proc`, unchanged-metadata, and unambiguous-window requirements.
+The generic validator remains unchanged. A small centralized registry handles known cases where live X11 window identity and executable identity differ. Process compatibility adapters do not weaken Command+Q semantics. They prove an exact relationship from a listed window identity to a listed process identity, while retaining local PID, same-user, fresh `/proc`, unchanged-metadata, and unambiguous-window requirements. The separate internal-document layer affects only Command+W and top-level Shift+Command+W for its three supported identities.
 
 Current compatibility behavior:
 
@@ -169,7 +189,7 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 - A dialog that omits `WM_TRANSIENT_FOR` is still attached when it advertises `_NET_WM_WINDOW_TYPE_DIALOG`; ownership then falls back to class/leader evidence.
 - An unusual user-facing utility window is intentionally excluded in Milestone 2. A later configuration layer may need a per-application opt-in.
 - Minimized/hidden normal windows remain meaningful and are counted. Mapping state is reported rather than used as an identity filter.
-- Thunderbird tabs are internal application objects, not X11 windows. Command+W therefore retains generic window lifecycle semantics and cannot close an individual mail tab.
+- Internal-document support currently covers only Brave Browser, Brave Origin, and Thunderbird. Other tabbed applications retain their ordinary X11 window lifecycle until they have an evidence-backed provider.
 - GIMP multi-window mode has not been physically exercised with multiple edited images. Its adapter is conservative about PID consistency and uses native close requests so GIMP retains confirmation authority.
 - LibreOffice Command+Q intentionally means whole-suite quit: every validated Writer/Calc/other supported module window receives a native close request. If module windows expose different PIDs, the adapter refuses.
 - The current Spotify launcher uses an isolated Brave user-data directory, but MacLife does not rely on that deployment detail. The adapter remains window-only and cannot terminate unrelated Brave processes.
@@ -179,8 +199,8 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 
 Automated tests cover generic eligibility, one/two-window policy, transient ownership, marker-only generic restore selection, safe and ambiguous generic process quit, compatibility alias validation, LibreOffice family scoping, shared Brave/PWA safety, process-metadata revalidation, desktop filtering, terminal/native exceptions, all reference applications, logical-active state transitions, XInput device classification, the physical lifecycle-chord state machine, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
 
-Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md), Milestone 3 input/lifecycle validation in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md), Milestone 4 generic-policy validation in [docs/milestone-4-live-test-checklist.md](docs/milestone-4-live-test-checklist.md), Milestone 5 service validation in [docs/milestone-5-live-test-checklist.md](docs/milestone-5-live-test-checklist.md), and Milestone 6 compatibility validation in [docs/milestone-6-live-test-checklist.md](docs/milestone-6-live-test-checklist.md).
+Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md), Milestone 3 input/lifecycle validation in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md), Milestone 4 generic-policy validation in [docs/milestone-4-live-test-checklist.md](docs/milestone-4-live-test-checklist.md), Milestone 5 service validation in [docs/milestone-5-live-test-checklist.md](docs/milestone-5-live-test-checklist.md), Milestone 6 compatibility validation in [docs/milestone-6-live-test-checklist.md](docs/milestone-6-live-test-checklist.md), and Milestone 6.1 internal-document validation in [docs/milestone-6.1-live-test-checklist.md](docs/milestone-6.1-live-test-checklist.md).
 
 ## Milestone boundary
 
-Milestone 6 is X11/XFCE-only and intentionally conservative; it does not claim universal Linux application compatibility. It does not implement Command+H or Command+M, title-bar close interception, xfwm4 patches, restoration across logout/login or a new X server, GUI configuration, unsafe user-defined process aliases, or Wayland support. Same-session daemon restart adoption is deliberately narrower than persistent session restoration.
+Milestone 6.1 is X11/XFCE-only and intentionally conservative; it does not claim universal Linux application or tab compatibility. It does not implement Command+H or Command+M, title-bar close interception, xfwm4 patches, CDP/debugging ports, screenshot tab detection, restoration across logout/login or a new X server, GUI configuration, unsafe user-defined process aliases, or Wayland support. Same-session daemon restart adoption is deliberately narrower than persistent session restoration.
