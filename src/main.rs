@@ -1,7 +1,8 @@
+use maclife::documents::{self, AtspiDocumentProvider, InternalDocumentProvider};
 use maclife::{identity, report, runtime, x11, DynError};
 
 fn usage() -> &'static str {
-    "Usage:\n  maclife inspect [--verbose]\n  maclife run [--dry-run] [--verbose] [--close-keycode N] [--quit-keycode N]\n  maclife restore APPLICATION\n\nInspect is read-only. Run grabs the dedicated Toshy keys. Restore only activates a window explicitly marked as MacLife-hidden."
+    "Usage:\n  maclife inspect [--verbose]\n  maclife run [--dry-run] [--verbose] [--close-keycode N] [--quit-keycode N] [--close-window-keycode N]\n  maclife restore APPLICATION\n\nInspect is read-only. Run grabs the dedicated Toshy keys. Restore only activates a window explicitly marked as MacLife-hidden."
 }
 
 fn run() -> Result<(), DynError> {
@@ -28,6 +29,11 @@ fn run() -> Result<(), DynError> {
             let snapshot = x11::collect_snapshot()?;
             let inspection = identity::inspect(snapshot.active_window, snapshot.windows)?;
             print!("{}", report::render(&inspection, verbose));
+            if documents::adapter_for(&inspection.app_identity).is_some() {
+                let mut provider = AtspiDocumentProvider::connect();
+                let state = provider.inspect(&inspection);
+                println!("Internal documents: {}", state.summary());
+            }
             Ok(())
         }
         Some("run") => {
@@ -38,7 +44,7 @@ fn run() -> Result<(), DynError> {
                 match arguments[index].as_str() {
                     "--dry-run" => options.dry_run = true,
                     "-v" | "--verbose" => options.verbose = true,
-                    "--close-keycode" | "--quit-keycode" => {
+                    "--close-keycode" | "--quit-keycode" | "--close-window-keycode" => {
                         let option = arguments[index].clone();
                         index += 1;
                         let value = arguments
@@ -47,8 +53,10 @@ fn run() -> Result<(), DynError> {
                             .parse::<u8>()?;
                         if option == "--close-keycode" {
                             options.close_keycode = value;
-                        } else {
+                        } else if option == "--quit-keycode" {
                             options.quit_keycode = value;
+                        } else {
+                            options.close_window_keycode = value;
                         }
                     }
                     "-h" | "--help" => {

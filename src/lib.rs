@@ -2,6 +2,7 @@
 
 pub mod control;
 pub mod compatibility;
+pub mod documents;
 pub mod identity;
 pub mod input;
 pub mod lifecycle;

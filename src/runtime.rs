@@ -1,5 +1,9 @@
 use crate::compatibility::{self, CompatibilityAdapter, CompatibilityQuit};
 use crate::control;
+use crate::documents::{
+    self, AtspiDocumentProvider, CloseDocumentMethod, CloseTopLevelMethod,
+    DocumentCloseDecision, InternalDocumentProvider,
+};
 use crate::identity::{self, normalized_app_identity};
 use crate::input::{IntentDevices, KeyPhase, LifecycleChordTracker};
 use crate::lifecycle::{
@@ -24,11 +28,13 @@ use x11rb::rust_connection::RustConnection;
 
 pub const DEFAULT_CLOSE_KEYCODE: u8 = 191;
 pub const DEFAULT_QUIT_KEYCODE: u8 = 192;
+pub const DEFAULT_CLOSE_WINDOW_KEYCODE: u8 = 195;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RunOptions {
     pub close_keycode: u8,
     pub quit_keycode: u8,
+    pub close_window_keycode: u8,
     pub dry_run: bool,
     pub verbose: bool,
 }
@@ -38,6 +44,7 @@ impl Default for RunOptions {
         Self {
             close_keycode: DEFAULT_CLOSE_KEYCODE,
             quit_keycode: DEFAULT_QUIT_KEYCODE,
+            close_window_keycode: DEFAULT_CLOSE_WINDOW_KEYCODE,
             dry_run: false,
             verbose: false,
         }
@@ -217,6 +224,7 @@ fn observe_keyboard_intent(
         phase,
         options.close_keycode,
         options.quit_keycode,
+        options.close_window_keycode,
     );
     let log_input = !matches!(
         intent,
@@ -252,17 +260,60 @@ fn observe_keyboard_intent(
 fn handle_close(
     options: RunOptions,
     hidden: &mut HiddenWindows,
+    document_provider: &mut AtspiDocumentProvider,
 ) -> Result<(), DynError> {
     if hidden.pointer_intent_pending() {
         confirm_current_interaction(hidden, "button", true, options.verbose)?;
     }
     let (snapshot, inspection) = focused_inspection()?;
     reconcile_hidden(hidden, &snapshot);
+    document_provider.retain_windows(&snapshot.windows);
+    let focus = focus_kind(&inspection);
+    if documents::adapter_for(&inspection.app_identity).is_some()
+        && focus == FocusKind::Meaningful
+    {
+        let state = document_provider.inspect(&inspection);
+        let decision = documents::close_decision(&state);
+        let action = match &decision {
+            DocumentCloseDecision::CloseActiveDocument => "native-close-active-document",
+            DocumentCloseDecision::PreserveTopLevelWindow => "iconify-final-document-window",
+            DocumentCloseDecision::Refuse(_) => "refuse",
+        };
+        println!(
+            "Cmd+W focused={} policy=internal-documents provider=atspi action={} xid=0x{:08x} {}",
+            inspection.app_identity,
+            action,
+            inspection.focused_xid,
+            state.concise_summary()
+        );
+        if options.verbose {
+            println!("internal-documents {}", state.summary());
+            print!("{}", report::render(&inspection, true));
+        }
+        if options.dry_run {
+            return Ok(());
+        }
+        return match decision {
+            DocumentCloseDecision::CloseActiveDocument => {
+                let adapter = documents::adapter_for(&inspection.app_identity)
+                    .ok_or("internal-document adapter disappeared")?;
+                match adapter.close_document {
+                    CloseDocumentMethod::ControlW => {
+                        control::close_active_document(inspection.focused_xid)
+                    }
+                }
+            }
+            DocumentCloseDecision::PreserveTopLevelWindow => {
+                hide_and_remember(hidden, &inspection)
+            }
+            DocumentCloseDecision::Refuse(reason) => Err(reason.into()),
+        };
+    }
     let (policy, ineligible_reason) = policy_for(&inspection);
     let decision = lifecycle::close_decision(
         policy,
         inspection.meaningful_windows.len(),
-        focus_kind(&inspection),
+        focus,
     );
     let adapter = compatibility::adapter_for(&inspection.app_identity)
         .map(|adapter| adapter.name)
@@ -288,31 +339,86 @@ fn handle_close(
             control::request_close(inspection.focused_xid)
         }
         CloseDecision::HideLast => {
-            control::iconify_and_mark(inspection.focused_xid)?;
-            thread::sleep(Duration::from_millis(300));
-            let after = x11::collect_snapshot()?;
-            let hidden_confirmed = after.windows.iter().any(|window| {
-                window.xid == inspection.focused_xid
-                    && window.maclife_hidden
-                    && (!window.mapped
-                        || window
-                            .states
-                            .iter()
-                            .any(|state| state == "_NET_WM_STATE_HIDDEN"))
-            });
-            if !hidden_confirmed {
-                let _ = control::clear_hidden_marker(inspection.focused_xid);
-                return Err(format!(
-                    "xfwm4 did not confirm iconification of 0x{:08x}",
-                    inspection.focused_xid
-                )
-                .into());
-            }
-            hidden.remember_as_logical(inspection.focused_xid, inspection.app_identity);
-            Ok(())
+            hide_and_remember(hidden, &inspection)
         }
         CloseDecision::Refuse(reason) => Err(ineligible_reason.unwrap_or(reason).into()),
     }
+}
+
+fn hide_and_remember(
+    hidden: &mut HiddenWindows,
+    inspection: &Inspection,
+) -> Result<(), DynError> {
+    control::iconify_and_mark(inspection.focused_xid)?;
+    thread::sleep(Duration::from_millis(300));
+    let after = x11::collect_snapshot()?;
+    let hidden_confirmed = after.windows.iter().any(|window| {
+        window.xid == inspection.focused_xid
+            && window.maclife_hidden
+            && (!window.mapped
+                || window
+                    .states
+                    .iter()
+                    .any(|state| state == "_NET_WM_STATE_HIDDEN"))
+    });
+    if !hidden_confirmed {
+        let _ = control::clear_hidden_marker(inspection.focused_xid);
+        return Err(format!(
+            "xfwm4 did not confirm iconification of 0x{:08x}",
+            inspection.focused_xid
+        )
+        .into());
+    }
+    hidden.remember_as_logical(inspection.focused_xid, inspection.app_identity.clone());
+    Ok(())
+}
+
+fn handle_close_top_level(
+    options: RunOptions,
+    hidden: &mut HiddenWindows,
+    document_provider: &mut AtspiDocumentProvider,
+) -> Result<(), DynError> {
+    if hidden.pointer_intent_pending() {
+        confirm_current_interaction(hidden, "button", true, options.verbose)?;
+    }
+    let (snapshot, inspection) = focused_inspection()?;
+    reconcile_hidden(hidden, &snapshot);
+    document_provider.retain_windows(&snapshot.windows);
+    let focus = focus_kind(&inspection);
+    if focus == FocusKind::Excluded {
+        return Err("focused window is excluded from lifecycle control".into());
+    }
+    let target = if focus == FocusKind::Attached {
+        inspection.identity_window.xid
+    } else {
+        inspection.focused_xid
+    };
+    let method = documents::adapter_for(&inspection.app_identity)
+        .map(|adapter| adapter.close_top_level)
+        .unwrap_or(CloseTopLevelMethod::WmDelete);
+    let method_name = match method {
+        CloseTopLevelMethod::ControlShiftW => "native-ctrl-shift-w",
+        CloseTopLevelMethod::WmDelete => "wm-delete-top-level",
+    };
+    println!(
+        "Shift+Cmd+W focused={} policy=top-level-window action={} xid=0x{:08x}",
+        inspection.app_identity, method_name, target
+    );
+    if options.verbose {
+        print!("{}", report::render(&inspection, true));
+    }
+    if options.dry_run {
+        return Ok(());
+    }
+    let result = match method {
+        CloseTopLevelMethod::ControlShiftW => control::close_brave_top_level(target),
+        CloseTopLevelMethod::WmDelete => control::request_close(target),
+    };
+    if result.is_ok() {
+        document_provider.invalidate(target);
+        hidden.forget(target);
+    }
+    result
 }
 
 fn command_status(program: &str, arguments: &[&str]) -> Result<(), DynError> {
@@ -765,14 +871,17 @@ fn handle_event(
     intent_devices: &mut IntentDevices,
     chord_tracker: &mut LifecycleChordTracker,
     hidden: &mut HiddenWindows,
+    document_provider: &mut AtspiDocumentProvider,
     options: RunOptions,
 ) {
     match event {
         Event::KeyPress(event) => {
             let result = if event.detail == options.close_keycode {
-                handle_close(options, hidden)
+                handle_close(options, hidden, document_provider)
             } else if event.detail == options.quit_keycode {
                 handle_quit(options, hidden)
+            } else if event.detail == options.close_window_keycode {
+                handle_close_top_level(options, hidden, document_provider)
             } else {
                 return;
             };
@@ -875,8 +984,16 @@ fn wait_for_x_or_shutdown(
 }
 
 pub fn run(options: RunOptions) -> Result<(), DynError> {
-    if options.close_keycode == options.quit_keycode {
-        return Err("close and quit keycodes must differ".into());
+    let keycodes = [
+        options.close_keycode,
+        options.quit_keycode,
+        options.close_window_keycode,
+    ];
+    if keycodes[0] == keycodes[1]
+        || keycodes[0] == keycodes[2]
+        || keycodes[1] == keycodes[2]
+    {
+        return Err("close, quit, and close-window keycodes must differ".into());
     }
     let _singleton = match SingletonGuard::acquire()? {
         AcquireResult::Acquired(guard) => guard,
@@ -907,11 +1024,21 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
     .check()?;
     let mut intent_devices = IntentDevices::initialize(&conn, root)?;
     let mut chord_tracker = LifecycleChordTracker::default();
+    let mut document_provider = AtspiDocumentProvider::connect();
     conn.grab_key(
         false,
         root,
         ModMask::ANY,
         options.close_keycode,
+        GrabMode::ASYNC,
+        GrabMode::ASYNC,
+    )?
+    .check()?;
+    conn.grab_key(
+        false,
+        root,
+        ModMask::ANY,
+        options.close_window_keycode,
         GrabMode::ASYNC,
         GrabMode::ASYNC,
     )?
@@ -938,11 +1065,13 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
         reconcile_hidden(&mut hidden, &snapshot);
     }
     println!(
-        "MacLife started: close_keycode={} quit_keycode={} dry_run={} adopted_hidden={} {}",
+        "MacLife started: close_keycode={} quit_keycode={} close_window_keycode={} dry_run={} adopted_hidden={} atspi={} {}",
         options.close_keycode,
         options.quit_keycode,
+        options.close_window_keycode,
         options.dry_run,
         hidden.len(),
+        document_provider.availability(),
         intent_devices.summary()
     );
 
@@ -956,6 +1085,7 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
                 &mut intent_devices,
                 &mut chord_tracker,
                 &mut hidden,
+                &mut document_provider,
                 options,
             );
         }

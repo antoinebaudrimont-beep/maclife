@@ -1,4 +1,4 @@
-use crate::model::{Snapshot, WindowFacts, WmClass};
+use crate::model::{Snapshot, WindowFacts, WindowGeometry, WmClass};
 use crate::process;
 use crate::DynError;
 use std::collections::HashSet;
@@ -196,6 +196,21 @@ impl Collector {
 
     fn collect_window(&self, xid: Window) -> Option<WindowFacts> {
         let attributes = self.conn.get_window_attributes(xid).ok()?.reply().ok()?;
+        let geometry = self.conn.get_geometry(xid).ok()?.reply().ok();
+        let translated = self
+            .conn
+            .translate_coordinates(xid, self.root, 0, 0)
+            .ok()?
+            .reply()
+            .ok();
+        let geometry = geometry.and_then(|geometry| {
+            translated.map(|translated| WindowGeometry {
+                x: i32::from(translated.dst_x),
+                y: i32::from(translated.dst_y),
+                width: geometry.width,
+                height: geometry.height,
+            })
+        });
         let title = self
             .text_property(xid, self.atoms.NET_WM_NAME, self.atoms.UTF8_STRING)
             .or_else(|| {
@@ -252,6 +267,7 @@ impl Collector {
             override_redirect: attributes.override_redirect,
             mapped: attributes.map_state != MapState::UNMAPPED,
             maclife_hidden,
+            geometry,
         })
     }
 

@@ -2,13 +2,18 @@ use crate::DynError;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, PropMode, Window,
+    KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
 };
+use x11rb::protocol::xtest::ConnectionExt as XTestConnectionExt;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 use x11rb::CURRENT_TIME;
 
 const ICONIC_STATE: u32 = 3;
 const SOURCE_APPLICATION: u32 = 1;
+const XK_CONTROL_L: u32 = 0xffe3;
+const XK_SHIFT_L: u32 = 0xffe1;
+const XK_W: u32 = 0x0077;
 
 fn connect_root() -> Result<(RustConnection, Window), DynError> {
     let (conn, screen_number) = x11rb::connect(None)?;
@@ -115,4 +120,82 @@ pub fn clear_hidden_marker(window: Window) -> Result<(), DynError> {
     conn.delete_property(window, marker)?.check()?;
     conn.flush()?;
     Ok(())
+}
+
+fn active_window(
+    conn: &RustConnection,
+    root: Window,
+    active_atom: Atom,
+) -> Result<Window, DynError> {
+    let reply = conn
+        .get_property(false, root, active_atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    Ok(reply
+        .value32()
+        .and_then(|mut values| values.next())
+        .unwrap_or_default())
+}
+
+fn keycode_for_keysym(conn: &RustConnection, keysym: u32) -> Result<u8, DynError> {
+    let setup = conn.setup();
+    let count = setup
+        .max_keycode
+        .checked_sub(setup.min_keycode)
+        .and_then(|value| value.checked_add(1))
+        .ok_or("invalid X11 keycode range")?;
+    let mapping = conn
+        .get_keyboard_mapping(setup.min_keycode, count)?
+        .reply()?;
+    let width = usize::from(mapping.keysyms_per_keycode);
+    if width == 0 {
+        return Err("X11 keyboard mapping has zero keysyms per keycode".into());
+    }
+    mapping
+        .keysyms
+        .chunks(width)
+        .position(|symbols| symbols.contains(&keysym))
+        .and_then(|index| setup.min_keycode.checked_add(index as u8))
+        .ok_or_else(|| format!("X11 keyboard mapping has no keysym 0x{keysym:x}").into())
+}
+
+fn send_shortcut(window: Window, shift: bool) -> Result<(), DynError> {
+    let (conn, root) = connect_root()?;
+    let active_atom = atom(&conn, "_NET_ACTIVE_WINDOW", true)?;
+    let active = active_window(&conn, root, active_atom)?;
+    if active != window {
+        return Err(format!(
+            "focused X11 window changed before native shortcut: expected 0x{window:08x}, found 0x{active:08x}"
+        )
+        .into());
+    }
+
+    let control = keycode_for_keysym(&conn, XK_CONTROL_L)?;
+    let shift_key = shift.then(|| keycode_for_keysym(&conn, XK_SHIFT_L)).transpose()?;
+    let w = keycode_for_keysym(&conn, XK_W)?;
+    conn.xtest_fake_input(KEY_PRESS_EVENT, control, CURRENT_TIME, root, 0, 0, 0)?
+        .check()?;
+    if let Some(shift_key) = shift_key {
+        conn.xtest_fake_input(KEY_PRESS_EVENT, shift_key, CURRENT_TIME, root, 0, 0, 0)?
+            .check()?;
+    }
+    conn.xtest_fake_input(KEY_PRESS_EVENT, w, CURRENT_TIME, root, 0, 0, 0)?
+        .check()?;
+    conn.xtest_fake_input(KEY_RELEASE_EVENT, w, CURRENT_TIME, root, 0, 0, 0)?
+        .check()?;
+    if let Some(shift_key) = shift_key {
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_key, CURRENT_TIME, root, 0, 0, 0)?
+            .check()?;
+    }
+    conn.xtest_fake_input(KEY_RELEASE_EVENT, control, CURRENT_TIME, root, 0, 0, 0)?
+        .check()?;
+    conn.flush()?;
+    Ok(())
+}
+
+pub fn close_active_document(window: Window) -> Result<(), DynError> {
+    send_shortcut(window, false)
+}
+
+pub fn close_brave_top_level(window: Window) -> Result<(), DynError> {
+    send_shortcut(window, true)
 }

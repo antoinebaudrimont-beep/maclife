@@ -8,4 +8,5 @@ license = "MIT"
 
 [dependencies]
 libc = "0.2"
-x11rb = { version = "0.14.0", default-features = false, features = ["xinput"] }
+zbus = "4.4.0"
+x11rb = { version = "0.14.0", default-features = false, features = ["xinput", "xtest"] }

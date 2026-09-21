@@ -14,6 +14,14 @@ pub struct ProcessInfo {
     pub command_line: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u16,
+    pub height: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowFacts {
     pub xid: u32,
@@ -31,6 +39,7 @@ pub struct WindowFacts {
     pub override_redirect: bool,
     pub mapped: bool,
     pub maclife_hidden: bool,
+    pub geometry: Option<WindowGeometry>,
 }
 
 impl WindowFacts {
@@ -55,6 +64,12 @@ impl WindowFacts {
             override_redirect: false,
             mapped: true,
             maclife_hidden: false,
+            geometry: Some(WindowGeometry {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            }),
         }
     }
 }

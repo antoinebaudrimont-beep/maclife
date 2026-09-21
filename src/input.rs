@@ -133,6 +133,7 @@ pub enum KeyIntent {
     LifecyclePrecursor,
     LifecycleClose,
     LifecycleQuit,
+    LifecycleCloseWindow,
     LifecycleSuffix,
     Release,
 }
@@ -148,6 +149,7 @@ impl KeyIntent {
             Self::LifecyclePrecursor => "lifecycle-precursor",
             Self::LifecycleClose => "lifecycle-close",
             Self::LifecycleQuit => "lifecycle-quit",
+            Self::LifecycleCloseWindow => "lifecycle-close-window",
             Self::LifecycleSuffix => "lifecycle-suffix",
             Self::Release => "release",
         }
@@ -183,13 +185,17 @@ impl LifecycleChordTracker {
         phase: KeyPhase,
         close_keycode: u8,
         quit_keycode: u8,
+        close_window_keycode: u8,
     ) -> KeyIntent {
         let close = u32::from(close_keycode);
         let quit = u32::from(quit_keycode);
-        let is_lifecycle = keycode == close || keycode == quit;
+        let close_window = u32::from(close_window_keycode);
+        let is_lifecycle = keycode == close || keycode == quit || keycode == close_window;
         let lifecycle_intent = || {
             if keycode == close {
                 KeyIntent::LifecycleClose
+            } else if keycode == close_window {
+                KeyIntent::LifecycleCloseWindow
             } else {
                 KeyIntent::LifecycleQuit
             }
@@ -218,6 +224,8 @@ impl LifecycleChordTracker {
                 self.state = ChordState::AwaitingSuffix;
                 if keycode == close {
                     KeyIntent::LifecycleClose
+                } else if keycode == close_window {
+                    KeyIntent::LifecycleCloseWindow
                 } else {
                     KeyIntent::LifecycleQuit
                 }
@@ -313,7 +321,7 @@ mod tests {
         let mut tracker = LifecycleChordTracker::default();
         sequence
             .iter()
-            .map(|(keycode, phase)| tracker.observe(*keycode, *phase, 191, 192))
+            .map(|(keycode, phase)| tracker.observe(*keycode, *phase, 191, 192, 195))
             .collect()
     }
 
@@ -348,6 +356,25 @@ mod tests {
     }
 
     #[test]
+    fn physical_close_window_sequence_never_confirms_user_intent() {
+        let sequence = [
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+            (195, KeyPhase::Press),
+            (195, KeyPhase::Release),
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+        ];
+        let intents = classify(&sequence);
+        assert!(intents
+            .iter()
+            .all(|intent| !intent.confirms_user_intent()));
+        assert!(intents.contains(&KeyIntent::LifecycleCloseWindow));
+        assert!(!intents.contains(&KeyIntent::LifecycleClose));
+        assert!(!intents.contains(&KeyIntent::LifecycleQuit));
+    }
+
+    #[test]
     fn ordinary_key_and_disambiguated_wrapper_confirm_user_intent() {
         assert_eq!(
             classify(&[(38, KeyPhase::Press)]),
@@ -376,6 +403,9 @@ mod tests {
             (105, KeyPhase::Press),
             (105, KeyPhase::Release),
             (192, KeyPhase::Press),
+            (105, KeyPhase::Press),
+            (105, KeyPhase::Release),
+            (195, KeyPhase::Press),
             (105, KeyPhase::Press),
             (105, KeyPhase::Release),
         ];

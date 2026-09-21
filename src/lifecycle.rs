@@ -268,7 +268,7 @@ mod tests {
         phase: KeyPhase,
     ) {
         if tracker
-            .observe(keycode, phase, 191, 192)
+            .observe(keycode, phase, 191, 192, 195)
             .confirms_user_intent()
         {
             hidden.confirm_user_focus(focused_xid);
