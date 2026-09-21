@@ -145,6 +145,13 @@ pub fn render(inspection: &Inspection, verbose: bool) -> String {
                 "  Accepted process identities: {}",
                 adapter.process_identities.join(", ")
             );
+            if !adapter.process_executables.is_empty() {
+                let _ = writeln!(
+                    output,
+                    "  Accepted process executables: {}",
+                    adapter.process_executables.join(", ")
+                );
+            }
             let _ = writeln!(
                 output,
                 "  Process resolution: {}",

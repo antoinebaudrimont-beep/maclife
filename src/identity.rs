@@ -64,13 +64,28 @@ fn apply_alias(value: &str) -> &str {
 
 pub fn normalized_app_identity(window: &WindowFacts) -> String {
     let class_value = window.wm_class.as_ref().and_then(|class| {
-        (!class.class.trim().is_empty())
-            .then_some(class.class.as_str())
-            .or_else(|| (!class.instance.trim().is_empty()).then_some(class.instance.as_str()))
+        let normalized_class = (!class.class.trim().is_empty())
+            .then(|| apply_alias(&slug(&class.class)).to_string());
+        let normalized_instance = (!class.instance.trim().is_empty()).then(|| slug(&class.instance));
+
+        match (normalized_class, normalized_instance) {
+            (Some(class), Some(instance))
+                if matches!(class.as_str(), "brave-origin" | "brave-browser")
+                    && instance.starts_with("crx-") =>
+            {
+                // Chromium application windows can share the browser process and
+                // class while exposing their app id only through the WM_CLASS
+                // instance. Keep them outside the browser lifecycle window count,
+                // and retain the concrete Brave variant in the identity.
+                Some(format!("{class}-{instance}"))
+            }
+            (Some(class), _) => Some(class),
+            (None, Some(instance)) => Some(apply_alias(&instance).to_string()),
+            (None, None) => None,
+        }
     });
     let process_value = window.process.as_ref().map(normalized_process_identity);
     let normalized = class_value
-        .map(slug)
         .or(process_value)
         .unwrap_or_else(|| "unknown".to_string());
     apply_alias(&normalized).to_string()
@@ -342,6 +357,39 @@ mod tests {
         assert_eq!(result.app_identity, "brave-origin");
         assert_eq!(result.meaningful_windows.len(), 1);
         assert_eq!(result.meaningful_windows[0].xid, 10);
+    }
+
+    #[test]
+    fn keeps_brave_app_windows_outside_each_browser_variant() {
+        let mut origin_app = WindowFacts::test_window(10, "Brave-origin");
+        origin_app.wm_class = Some(WmClass {
+            instance: "crx_mjoklplbddabcmpepnokjaffbmgbkkgg".to_string(),
+            class: "Brave-origin".to_string(),
+        });
+        let origin_browser = WindowFacts::test_window(20, "Brave-origin");
+        let browser = WindowFacts::test_window(30, "Brave-browser");
+
+        assert_eq!(
+            normalized_app_identity(&origin_app),
+            "brave-origin-crx-mjoklplbddabcmpepnokjaffbmgbkkgg"
+        );
+
+        let origin_result = inspect(
+            20,
+            vec![origin_app.clone(), origin_browser, browser.clone()],
+        )
+        .expect("origin inspection");
+        assert_eq!(origin_result.app_identity, "brave-origin");
+        assert_eq!(origin_result.meaningful_windows.len(), 1);
+        assert_eq!(origin_result.meaningful_windows[0].xid, 20);
+
+        let app_result = inspect(10, vec![origin_app, browser]).expect("app inspection");
+        assert_eq!(
+            app_result.app_identity,
+            "brave-origin-crx-mjoklplbddabcmpepnokjaffbmgbkkgg"
+        );
+        assert_eq!(app_result.meaningful_windows.len(), 1);
+        assert_eq!(app_result.meaningful_windows[0].xid, 10);
     }
 
     #[test]

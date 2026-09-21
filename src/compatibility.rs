@@ -5,6 +5,7 @@ use crate::model::{Disposition, Inspection, WindowFacts};
 pub enum CompatibilityQuit {
     CloseLogicalWindows,
     CloseFamilyWindows,
+    TerminateValidatedProcess,
 }
 
 impl CompatibilityQuit {
@@ -12,6 +13,7 @@ impl CompatibilityQuit {
         match self {
             Self::CloseLogicalWindows => "wm-delete-logical-app-windows",
             Self::CloseFamilyWindows => "wm-delete-application-family-windows",
+            Self::TerminateValidatedProcess => "validated-pid-sigterm",
         }
     }
 }
@@ -21,6 +23,7 @@ pub struct CompatibilityAdapter {
     pub name: &'static str,
     pub window_identities: &'static [&'static str],
     pub process_identities: &'static [&'static str],
+    pub process_executables: &'static [&'static str],
     pub family: Option<&'static str>,
     pub quit: CompatibilityQuit,
     pub shared_process: bool,
@@ -45,6 +48,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         name: "thunderbird",
         window_identities: THUNDERBIRD_WINDOWS,
         process_identities: &["thunderbird-bin"],
+        process_executables: &[],
         family: Some("thunderbird"),
         quit: CompatibilityQuit::CloseLogicalWindows,
         shared_process: false,
@@ -53,6 +57,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         name: "gimp",
         window_identities: GIMP_WINDOWS,
         process_identities: &["gimp-3-0"],
+        process_executables: &[],
         family: Some("gimp"),
         quit: CompatibilityQuit::CloseLogicalWindows,
         shared_process: false,
@@ -61,14 +66,34 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         name: "libreoffice",
         window_identities: LIBREOFFICE_WINDOWS,
         process_identities: &["soffice-bin"],
+        process_executables: &[],
         family: Some("libreoffice"),
         quit: CompatibilityQuit::CloseFamilyWindows,
         shared_process: true,
     },
     CompatibilityAdapter {
+        name: "brave-origin",
+        window_identities: &["brave-origin"],
+        process_identities: &["brave-browser"],
+        process_executables: &["/opt/brave.com/brave-origin/brave"],
+        family: Some("brave"),
+        quit: CompatibilityQuit::TerminateValidatedProcess,
+        shared_process: false,
+    },
+    CompatibilityAdapter {
+        name: "brave-browser",
+        window_identities: &["brave-browser"],
+        process_identities: &["brave-browser"],
+        process_executables: &["/opt/brave.com/brave/brave"],
+        family: Some("brave"),
+        quit: CompatibilityQuit::TerminateValidatedProcess,
+        shared_process: false,
+    },
+    CompatibilityAdapter {
         name: "brave-pwa-spotify",
         window_identities: SPOTIFY_WEB_WINDOWS,
         process_identities: &["brave-browser"],
+        process_executables: &[],
         family: Some("brave-pwa"),
         quit: CompatibilityQuit::CloseLogicalWindows,
         shared_process: true,
@@ -119,6 +144,18 @@ fn validate_window(
         return Err(format!(
             "adapter {} rejects process identity {process_identity}",
             adapter.name
+        ));
+    }
+    if !adapter.process_executables.is_empty()
+        && !process
+            .executable
+            .as_deref()
+            .is_some_and(|executable| adapter.process_executables.contains(&executable))
+    {
+        return Err(format!(
+            "adapter {} rejects process executable {}",
+            adapter.name,
+            process.executable.as_deref().unwrap_or("unknown")
         ));
     }
     Ok(pid)
@@ -225,7 +262,13 @@ mod tests {
     use crate::identity;
     use crate::model::{ProcessInfo, WindowFacts};
 
-    fn process_window(xid: u32, class: &str, pid: u32, executable: &str) -> WindowFacts {
+    fn process_window_path(
+        xid: u32,
+        class: &str,
+        pid: u32,
+        process_name: &str,
+        executable: &str,
+    ) -> WindowFacts {
         let mut window = WindowFacts::test_window(xid, class);
         window.pid = Some(pid);
         window.pid_validated = true;
@@ -234,11 +277,21 @@ mod tests {
             pid,
             uid: 1000,
             parent_pid: Some(1),
-            name: executable.to_string(),
-            executable: Some(format!("/usr/bin/{executable}")),
+            name: process_name.to_string(),
+            executable: Some(executable.to_string()),
             command_line: Some(executable.to_string()),
         });
         window
+    }
+
+    fn process_window(xid: u32, class: &str, pid: u32, executable: &str) -> WindowFacts {
+        process_window_path(
+            xid,
+            class,
+            pid,
+            executable,
+            &format!("/usr/bin/{executable}"),
+        )
     }
 
     #[test]
@@ -297,6 +350,54 @@ mod tests {
         let inspection = identity::inspect(10, vec![spotify, brave]).expect("inspection");
         assert_eq!(validate_inspection(adapter, &inspection), Ok(500));
         assert_eq!(inspection.meaningful_windows.len(), 1);
+    }
+
+    #[test]
+    fn brave_variants_accept_only_their_observed_executable_paths() {
+        let origin = adapter_for("brave-origin").expect("origin adapter");
+        let browser = adapter_for("brave-browser").expect("browser adapter");
+        assert_eq!(origin.quit, CompatibilityQuit::TerminateValidatedProcess);
+        assert_eq!(browser.quit, CompatibilityQuit::TerminateValidatedProcess);
+
+        let origin_window = process_window_path(
+            10,
+            "Brave-origin",
+            500,
+            "brave",
+            "/opt/brave.com/brave-origin/brave",
+        );
+        let browser_window = process_window_path(
+            20,
+            "Brave-browser",
+            600,
+            "brave",
+            "/opt/brave.com/brave/brave",
+        );
+        let origin_inspection =
+            identity::inspect(10, vec![origin_window.clone(), browser_window.clone()])
+                .expect("origin inspection");
+        let browser_inspection =
+            identity::inspect(20, vec![origin_window, browser_window])
+                .expect("browser inspection");
+
+        assert_eq!(validate_inspection(origin, &origin_inspection), Ok(500));
+        assert_eq!(validate_inspection(browser, &browser_inspection), Ok(600));
+        assert!(validate_inspection(browser, &origin_inspection).is_err());
+        assert!(validate_inspection(origin, &browser_inspection).is_err());
+    }
+
+    #[test]
+    fn brave_origin_refuses_browser_or_unexpected_executables() {
+        let adapter = adapter_for("brave-origin").expect("origin adapter");
+        for executable in [
+            "/opt/brave.com/brave/brave",
+            "/tmp/unexpected/brave",
+            "/opt/brave.com/brave-origin/brave-helper",
+        ] {
+            let window = process_window_path(10, "Brave-origin", 500, "brave", executable);
+            let inspection = identity::inspect(10, vec![window]).expect("inspection");
+            assert!(validate_inspection(adapter, &inspection).is_err());
+        }
     }
 
     #[test]

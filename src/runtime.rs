@@ -465,23 +465,31 @@ fn quit_with_compatibility_adapter(
         .into());
     }
     let current_pid = compatibility::validate_inspection(adapter, &current)?;
-    revalidate_process_metadata(
+    let revalidated_pid = revalidate_process_metadata(
         &original.identity_window,
         &current.identity_window,
         original_pid,
         current_pid,
     )?;
 
-    let windows = match adapter.quit {
-        CompatibilityQuit::CloseLogicalWindows => current.meaningful_windows,
-        CompatibilityQuit::CloseFamilyWindows => {
-            compatibility::family_windows(adapter, &snapshot.windows)?
+    match adapter.quit {
+        CompatibilityQuit::TerminateValidatedProcess => {
+            command_status("/bin/kill", &["-TERM", &revalidated_pid.to_string()])
         }
-    };
-    for window in windows {
-        control::request_close(window.xid)?;
+        CompatibilityQuit::CloseLogicalWindows | CompatibilityQuit::CloseFamilyWindows => {
+            let windows = match adapter.quit {
+                CompatibilityQuit::CloseLogicalWindows => current.meaningful_windows,
+                CompatibilityQuit::CloseFamilyWindows => {
+                    compatibility::family_windows(adapter, &snapshot.windows)?
+                }
+                CompatibilityQuit::TerminateValidatedProcess => unreachable!(),
+            };
+            for window in windows {
+                control::request_close(window.xid)?;
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 fn terminate_revalidated_pid(
@@ -1141,6 +1149,38 @@ mod tests {
         let mut second = hidden.clone();
         second.xid = 30;
         assert!(select_restore_candidate(&[hidden, second], "featherpad").is_err());
+    }
+
+    #[test]
+    fn brave_restore_selection_never_crosses_variant_or_app_identity() {
+        let mut origin = WindowFacts::test_window(10, "Brave-origin");
+        origin.maclife_hidden = true;
+        let mut browser = WindowFacts::test_window(20, "Brave-browser");
+        browser.maclife_hidden = true;
+        let mut origin_app = WindowFacts::test_window(30, "Brave-origin");
+        origin_app.maclife_hidden = true;
+        origin_app.wm_class = Some(crate::model::WmClass {
+            instance: "crx_mjoklplbddabcmpepnokjaffbmgbkkgg".to_string(),
+            class: "Brave-origin".to_string(),
+        });
+
+        let windows = [origin, browser, origin_app];
+        assert_eq!(
+            select_restore_candidate(&windows, "brave-origin").expect("origin candidate"),
+            10
+        );
+        assert_eq!(
+            select_restore_candidate(&windows, "brave-browser").expect("browser candidate"),
+            20
+        );
+        assert_eq!(
+            select_restore_candidate(
+                &windows,
+                "brave-origin-crx-mjoklplbddabcmpepnokjaffbmgbkkgg",
+            )
+            .expect("origin app candidate"),
+            30
+        );
     }
 
     #[test]
