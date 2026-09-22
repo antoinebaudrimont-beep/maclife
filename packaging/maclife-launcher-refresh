@@ -5,10 +5,11 @@ umask 077
 
 application_dir=${HOME}/.local/share/applications
 state_dir=${HOME}/.local/share/maclife/pwa-launcher-backups
+plank_state_dir=${HOME}/.local/share/maclife/plank-launcher-backups
 helper_dir=${HOME}/.local/libexec
 timestamp=$(date +%Y%m%d-%H%M%S)
 
-mkdir -p -- "$application_dir" "$state_dir"
+mkdir -p -- "$application_dir" "$state_dir" "$plank_state_dir"
 
 has_exec() {
     check_file=$1
@@ -183,6 +184,44 @@ refresh_launchers() {
     fi
 }
 
+refresh_plank_launchers() {
+    for dockitem in "$HOME"/.config/plank/*/launchers/*.dockitem; do
+        [ -f "$dockitem" ] || continue
+        for desktop_name in brave-browser.desktop brave-origin.desktop thunderbird.desktop; do
+            vendor_uri="file:///usr/share/applications/$desktop_name"
+            managed_uri="file://$application_dir/$desktop_name"
+            match_count=$(grep -Fxc "Launcher=$vendor_uri" "$dockitem" || true)
+            if [ "$match_count" -gt 1 ]; then
+                printf 'MacLife: refusing Plank item with duplicate launcher records: %s\n' \
+                    "$dockitem" >&2
+                continue
+            fi
+            [ "$match_count" -eq 1 ] || continue
+
+            dock_name=$(basename -- "$(dirname -- "$(dirname -- "$dockitem")")")
+            dockitem_name=${dockitem##*/}
+            state_name="$dock_name--$dockitem_name"
+            original_file="$plank_state_dir/$state_name.original"
+            managed_file="$plank_state_dir/$state_name.managed"
+            path_file="$plank_state_dir/$state_name.path"
+            desktop_file="$plank_state_dir/$state_name.desktop"
+            if [ ! -e "$original_file" ]; then
+                cp -p -- "$dockitem" "$original_file"
+            fi
+
+            temporary_file="${dockitem}.maclife-new-$$"
+            sed "s|^Launcher=$vendor_uri\$|Launcher=$managed_uri|" \
+                "$dockitem" >"$temporary_file"
+            chmod --reference="$dockitem" "$temporary_file"
+            mv -f -- "$temporary_file" "$dockitem"
+            cp -p -- "$dockitem" "$managed_file"
+            printf '%s\n' "$dockitem" >"$path_file"
+            printf '%s\n' "$desktop_name" >"$desktop_file"
+            printf 'MacLife: routed Plank launcher through managed override %s\n' "$dockitem"
+        done
+    done
+}
+
 restore_launchers() {
     for original_file in "$state_dir"/*.desktop.original; do
         [ -f "$original_file" ] || continue
@@ -222,14 +261,66 @@ restore_launchers() {
     fi
 }
 
+restore_plank_launchers() {
+    for original_file in "$plank_state_dir"/*.dockitem.original; do
+        [ -f "$original_file" ] || continue
+        state_name=${original_file##*/}
+        state_name=${state_name%.original}
+        managed_file="$plank_state_dir/$state_name.managed"
+        path_file="$plank_state_dir/$state_name.path"
+        desktop_file="$plank_state_dir/$state_name.desktop"
+        [ -r "$path_file" ] && [ -r "$desktop_file" ] || continue
+        IFS= read -r dockitem <"$path_file"
+        IFS= read -r desktop_name <"$desktop_file"
+        case "$dockitem" in
+            "$HOME"/.config/plank/*/launchers/*.dockitem) ;;
+            *)
+                printf 'MacLife: refusing unsafe saved Plank path %s\n' "$dockitem" >&2
+                continue
+                ;;
+        esac
+        case "$desktop_name" in
+            brave-browser.desktop|brave-origin.desktop|thunderbird.desktop) ;;
+            *)
+                printf 'MacLife: refusing unsafe saved desktop name %s\n' "$desktop_name" >&2
+                continue
+                ;;
+        esac
+        [ -e "$dockitem" ] || continue
+
+        if [ -e "$managed_file" ] && cmp -s "$dockitem" "$managed_file"; then
+            mv -f -- "$original_file" "$dockitem"
+            rm -f -- "$managed_file" "$path_file" "$desktop_file"
+            printf 'MacLife: restored Plank launcher %s\n' "$dockitem"
+            continue
+        fi
+
+        managed_uri="file://$application_dir/$desktop_name"
+        vendor_uri="file:///usr/share/applications/$desktop_name"
+        if grep -Fqx "Launcher=$managed_uri" "$dockitem"; then
+            conflict_backup="$dockitem.maclife-uninstall-backup-$timestamp"
+            cp -p -- "$dockitem" "$conflict_backup"
+            temporary_file="${dockitem}.maclife-restore-$$"
+            sed "s|^Launcher=$managed_uri\$|Launcher=$vendor_uri|" \
+                "$dockitem" >"$temporary_file"
+            chmod --reference="$dockitem" "$temporary_file"
+            mv -f -- "$temporary_file" "$dockitem"
+            printf 'MacLife: preserved custom Plank edits while restoring vendor launcher; backup: %s\n' \
+                "$conflict_backup"
+        fi
+    done
+}
+
 case ${1:-refresh} in
     refresh)
         [ "$#" -le 1 ] || { printf '%s\n' "Usage: $0 [refresh|--restore-all]" >&2; exit 2; }
         refresh_launchers
+        refresh_plank_launchers
         ;;
     --restore-all)
         [ "$#" -eq 1 ] || { printf '%s\n' "Usage: $0 [refresh|--restore-all]" >&2; exit 2; }
         restore_launchers
+        restore_plank_launchers
         ;;
     *)
         printf '%s\n' "Usage: $0 [refresh|--restore-all]" >&2
