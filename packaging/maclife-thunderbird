@@ -1,4 +1,9 @@
-#!/bin/sh
-GNOME_ACCESSIBILITY=1
-export GNOME_ACCESSIBILITY
-exec /usr/bin/thunderbird "$@"
+#!/bin/bash
+set -e
+
+export GNOME_ACCESSIBILITY=1
+
+# Debian's launcher derives MOZ_APP_LAUNCHER from $0 for XSMP restart state.
+# Source it so $0 remains this managed wrapper; all vendor setup is retained,
+# while XFCE records MacLife rather than the absolute /usr/bin launcher.
+source /usr/bin/thunderbird "$@"

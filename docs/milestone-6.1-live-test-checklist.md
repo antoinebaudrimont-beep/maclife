@@ -27,7 +27,7 @@ Target: MX Linux 25.2, XFCE/X11
 - Brave-generated PWA/web-app launchers are matched by exact Browser or Origin executable and rewritten to the corresponding wrapper without changing any arguments.
 - First-observed PWA files are backed up; exact managed files restore exactly, while later custom edits are retained during wrapper removal and receive a timestamped conflict backup.
 - An event-driven user path unit repairs regenerated launchers without polling processes or modifying vendor files.
-- XFCE restores Thunderbird from the bare `WM_COMMAND` value `thunderbird`. A marked `~/.xsessionrc` block therefore adds a directory containing only the managed Thunderbird shim to graphical-session `PATH`; normal desktop actions still use the absolute wrapper.
+- XFCE's legacy window record exposes bare `WM_COMMAND=thunderbird`, but the real XSMP state registered `RestartCommand=/usr/bin/thunderbird`. The managed Bash wrapper sources Debian's vendor launcher, preserving its setup while keeping `$0`/`MOZ_APP_LAUNCHER` on MacLife so future XSMP restarts execute the accessibility wrapper. A marked `~/.xsessionrc` block retains a Thunderbird-only `PATH` shim for legacy bare-command restoration.
 - Verbose inspection reports `launch-opt-in-detected=yes/no/unavailable` from the validated Brave command line or Thunderbird environment.
 - Brave bounded discovery skips only AT-SPI null objects or individual objects returning `UnknownMethod` for `GetRoleName`. Required frame, tab-list, selected-tab, and ambiguity checks remain strict.
 
@@ -58,8 +58,8 @@ Corrective automated result: **82 tests passed** with warnings denied. The optim
 - [x] Brave Browser PWA-first PID 92470 contained the opt-in, Default profile, and WhatsApp app ID; its normal window closed 3 -> 2 -> 1 -> hidden while WhatsApp remained separate.
 - [x] GitHub and WhatsApp Command+Q closed only the focused PWA window. Their respective normal Brave windows/processes remained; no process signal was used.
 - [x] Thunderbird managed launch PID 97850 contained `GNOME_ACCESSIBILITY=1`; message tabs closed 2 -> 1 -> 0/Inbox-only, then BaseOnly Inbox hid and restored as XID `0x0120002c`.
-- [ ] After a real logout/login or reboot, session-restored Thunderbird contains `GNOME_ACCESSIBILITY=1` before any manual relaunch; message-tab and BaseOnly behavior work immediately.
-- [ ] Global toolkit accessibility remains false, all three vendor desktop hashes are unchanged, one MacLife daemon remains healthy, and idle CPU/RSS show no regression.
+- [x] After a real logout/login, session-restored Thunderbird PID 198988 contained `GNOME_ACCESSIBILITY=1` and `MOZ_APP_LAUNCHER=/home/nupnus/.local/libexec/maclife-thunderbird` before any manual relaunch. XFCE recorded that wrapper in both `CloneCommand` and `RestartCommand`. Two message tabs then closed individually, BaseOnly Inbox hid with MacLife's private marker, restore returned the same XID `0x01c0002c` and PID, and Command+Q quit the application.
+- [x] Global toolkit accessibility remained false; all three vendor desktop hashes were unchanged; one MacLife daemon remained active with four tasks, 820 KiB current RSS, and 0.35 seconds accumulated CPU after the final login.
 
 Native application shortcuts are dispatched on the dedicated lifecycle key's core release. Live testing found that dispatching cached Brave Ctrl+W actions on F13 press could occur while F13 was still down; the initial uncached action had hidden this race by taking longer. Release dispatch removed the race without a guessed delay.
 
