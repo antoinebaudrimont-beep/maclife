@@ -125,6 +125,7 @@ sed "s|@SESSION_START@|$helper_dir/maclife-session-start|g" \
     "$repo_dir/packaging/maclife-autostart.desktop.in" >"$desktop_temp"
 
 systemctl --user stop maclife.service >/dev/null 2>&1 || true
+systemctl --user stop maclife-launcher-refresh.path >/dev/null 2>&1 || true
 install_atomic "$repo_dir/target/release/maclife" "$binary_dir/maclife" 0755
 install_atomic "$repo_dir/packaging/maclife-session-start" \
     "$helper_dir/maclife-session-start" 0755
@@ -162,7 +163,8 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$application_dir"
 fi
 systemctl --user daemon-reload
-systemctl --user enable --now maclife-launcher-refresh.path
+systemctl --user enable maclife-launcher-refresh.path
+systemctl --user restart maclife-launcher-refresh.path
 
 if [ "$start_service" = true ] && [ "${XDG_SESSION_TYPE:-}" = "x11" ] \
     && [ -n "${DISPLAY:-}" ]; then
