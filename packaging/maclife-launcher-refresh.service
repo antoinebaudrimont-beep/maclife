@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh MacLife accessibility launch routes
+Description=Refresh MacLife Brave PWA launcher wrappers
 
 [Service]
 Type=oneshot

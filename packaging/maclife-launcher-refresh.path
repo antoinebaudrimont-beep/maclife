@@ -1,9 +1,8 @@
 [Unit]
-Description=Watch MacLife-managed launcher entry points
+Description=Watch for regenerated Brave PWA launchers
 
 [Path]
 PathChanged=%h/.local/share/applications
-PathChanged=%h/.config/plank/dock1/launchers
 Unit=maclife-launcher-refresh.service
 
 [Install]
