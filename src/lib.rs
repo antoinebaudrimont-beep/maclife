@@ -5,6 +5,7 @@ pub mod compatibility;
 pub mod documents;
 pub mod identity;
 pub mod input;
+pub mod ipc;
 pub mod lifecycle;
 pub mod model;
 pub mod process;

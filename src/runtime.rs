@@ -6,6 +6,7 @@ use crate::documents::{
 };
 use crate::identity::{self, normalized_app_identity};
 use crate::input::{IntentDevices, KeyPhase, LifecycleChordTracker};
+use crate::ipc::{CloseRequest, LifecycleManager, LIFECYCLE_PROTOCOL_VERSION};
 use crate::lifecycle::{
     self, ActiveTarget, ApplicationPolicy, CloseDecision, FocusKind, HiddenWindows, PolicyKind,
     QuitMethod,
@@ -257,15 +258,24 @@ fn observe_keyboard_intent(
     }
 }
 
-fn handle_close(
+fn inspect_close_target(snapshot: &Snapshot, target_xid: u32) -> Result<Inspection, DynError> {
+    if !snapshot.windows.iter().any(|window| window.xid == target_xid) {
+        return Err(format!(
+            "requested close target 0x{target_xid:08x} is stale, destroyed, or unmanaged"
+        )
+        .into());
+    }
+    identity::inspect(target_xid, snapshot.windows.clone())
+}
+
+fn handle_close_inspection(
     options: RunOptions,
     hidden: &mut HiddenWindows,
     document_provider: &mut AtspiDocumentProvider,
+    snapshot: Snapshot,
+    inspection: Inspection,
+    source: &str,
 ) -> Result<(), DynError> {
-    if hidden.pointer_intent_pending() {
-        confirm_current_interaction(hidden, "button", true, options.verbose)?;
-    }
-    let (snapshot, inspection) = focused_inspection()?;
     reconcile_hidden(hidden, &snapshot);
     document_provider.retain_windows(&snapshot.windows);
     let focus = focus_kind(&inspection);
@@ -280,7 +290,8 @@ fn handle_close(
             DocumentCloseDecision::Refuse(_) => "refuse",
         };
         println!(
-            "Cmd+W focused={} policy=internal-documents provider=atspi action={} xid=0x{:08x} {}",
+            "{} target={} policy=internal-documents provider=atspi action={} xid=0x{:08x} {}",
+            source,
             inspection.app_identity,
             action,
             inspection.focused_xid,
@@ -325,7 +336,8 @@ fn handle_close(
         .map(|adapter| adapter.name)
         .unwrap_or("none");
     println!(
-        "Cmd+W focused={} meaningful_windows={} policy={} adapter={} action={} xid=0x{:08x}",
+        "{} target={} meaningful_windows={} policy={} adapter={} action={} xid=0x{:08x}",
+        source,
         inspection.app_identity,
         inspection.meaningful_windows.len(),
         policy.kind.name(),
@@ -349,6 +361,51 @@ fn handle_close(
         }
         CloseDecision::Refuse(reason) => Err(ineligible_reason.unwrap_or(reason).into()),
     }
+}
+
+fn handle_close(
+    options: RunOptions,
+    hidden: &mut HiddenWindows,
+    document_provider: &mut AtspiDocumentProvider,
+) -> Result<(), DynError> {
+    if hidden.pointer_intent_pending() {
+        confirm_current_interaction(hidden, "button", true, options.verbose)?;
+    }
+    let (snapshot, inspection) = focused_inspection()?;
+    handle_close_inspection(
+        options,
+        hidden,
+        document_provider,
+        snapshot,
+        inspection,
+        "Cmd+W",
+    )
+}
+
+fn handle_close_request(
+    options: RunOptions,
+    hidden: &mut HiddenWindows,
+    document_provider: &mut AtspiDocumentProvider,
+    request: CloseRequest,
+) -> Result<(), DynError> {
+    let snapshot = x11::collect_snapshot()?;
+    reconcile_hidden(hidden, &snapshot);
+    let inspection = inspect_close_target(&snapshot, request.target_xid)?;
+    if hidden.pointer_intent_pending() {
+        apply_confirmed_interaction(hidden, &inspection, "ssd-close-button", options.verbose);
+    }
+    let source = format!(
+        "Close(XID) source=xfwm4 request_id={} timestamp={}",
+        request.request_id, request.timestamp
+    );
+    handle_close_inspection(
+        options,
+        hidden,
+        document_provider,
+        snapshot,
+        inspection,
+        &source,
+    )
 }
 
 fn hide_and_remember(
@@ -875,6 +932,7 @@ fn handle_event(
     event: Event,
     root: u32,
     active_window_atom: u32,
+    lifecycle_manager: &LifecycleManager,
     intent_devices: &mut IntentDevices,
     chord_tracker: &mut LifecycleChordTracker,
     hidden: &mut HiddenWindows,
@@ -904,6 +962,25 @@ fn handle_event(
             if let Ok(snapshot) = x11::collect_snapshot() {
                 observe_focus(hidden, &snapshot, options.verbose);
             }
+        }
+        Event::ClientMessage(event) => match lifecycle_manager.decode(&event) {
+            Ok(Some(request)) => {
+                if let Err(error) =
+                    handle_close_request(options, hidden, document_provider, request)
+                {
+                    eprintln!(
+                        "MacLife Close(XID) request_id={} target=0x{:08x} refused/failed: {error}",
+                        request.request_id, request.target_xid
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("MacLife private close request refused: {error}"),
+        },
+        Event::SelectionClear(event) if lifecycle_manager.lost_selection(&event) => {
+            eprintln!(
+                "MacLife private lifecycle manager selection was lost; SSD close requests will fail closed"
+            );
         }
         Event::XinputRawKeyPress(event)
             if intent_devices.is_toshy_keyboard(event.sourceid) =>
@@ -1031,6 +1108,7 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
         &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
     )?
     .check()?;
+    let lifecycle_manager = LifecycleManager::claim(&conn, screen_number, root)?;
     let mut intent_devices = IntentDevices::initialize(&conn, root)?;
     let mut chord_tracker = LifecycleChordTracker::default();
     let mut document_provider = AtspiDocumentProvider::connect();
@@ -1074,13 +1152,15 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
         reconcile_hidden(&mut hidden, &snapshot);
     }
     println!(
-        "MacLife started: close_keycode={} quit_keycode={} close_window_keycode={} dry_run={} adopted_hidden={} atspi={} {}",
+        "MacLife started: close_keycode={} quit_keycode={} close_window_keycode={} dry_run={} adopted_hidden={} atspi={} lifecycle_protocol={} lifecycle_manager=0x{:08x} {}",
         options.close_keycode,
         options.quit_keycode,
         options.close_window_keycode,
         options.dry_run,
         hidden.len(),
         document_provider.availability(),
+        LIFECYCLE_PROTOCOL_VERSION,
+        lifecycle_manager.window(),
         intent_devices.summary()
     );
 
@@ -1091,6 +1171,7 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
                 event,
                 root,
                 active_window_atom,
+                &lifecycle_manager,
                 &mut intent_devices,
                 &mut chord_tracker,
                 &mut hidden,
@@ -1156,13 +1237,13 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        generic_process_pid, is_adoptable_hidden, revalidate_process_metadata,
-        revalidate_same_process,
+        generic_process_pid, inspect_close_target, is_adoptable_hidden,
+        revalidate_process_metadata, revalidate_same_process,
         select_restore_candidate,
     };
     use crate::compatibility;
     use crate::identity;
-    use crate::model::{ProcessInfo, WindowFacts};
+    use crate::model::{ProcessInfo, Snapshot, WindowFacts};
 
     fn process_window(xid: u32, class: &str, pid: u32, executable: &str) -> WindowFacts {
         let mut window = WindowFacts::test_window(xid, class);
@@ -1220,6 +1301,21 @@ mod tests {
         let window = process_window(10, "FeatherPad", 1234, "featherpad");
         let inspection = identity::inspect(10, vec![window]).expect("inspection");
         assert_eq!(generic_process_pid(&inspection).expect("safe PID"), 1234);
+    }
+
+    #[test]
+    fn close_target_uses_requested_xid_not_active_window() {
+        let snapshot = Snapshot {
+            active_window: 10,
+            windows: vec![
+                WindowFacts::test_window(10, "FeatherPad"),
+                WindowFacts::test_window(20, "Thunar"),
+            ],
+        };
+        let inspection = inspect_close_target(&snapshot, 20).expect("exact target");
+        assert_eq!(inspection.focused_xid, 20);
+        assert_eq!(inspection.app_identity, "thunar");
+        assert!(inspect_close_target(&snapshot, 30).is_err());
     }
 
     #[test]
