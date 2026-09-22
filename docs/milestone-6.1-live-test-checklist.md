@@ -22,6 +22,15 @@ Target: MX Linux 25.2, XFCE/X11
 - Pre-existing overrides are backed up and restorable by the uninstaller.
 - Vendor desktop files and global toolkit accessibility remain unchanged.
 
+### Launch-contract correction
+
+- Brave-generated PWA/web-app launchers are matched by exact Browser or Origin executable and rewritten to the corresponding wrapper without changing any arguments.
+- First-observed PWA files are backed up; exact managed files restore exactly, while later custom edits are retained during wrapper removal and receive a timestamped conflict backup.
+- An event-driven user path unit repairs regenerated launchers without polling processes or modifying vendor files.
+- XFCE restores Thunderbird from the bare `WM_COMMAND` value `thunderbird`. A marked `~/.xsessionrc` block therefore adds a directory containing only the managed Thunderbird shim to graphical-session `PATH`; normal desktop actions still use the absolute wrapper.
+- Verbose inspection reports `launch-opt-in-detected=yes/no/unavailable` from the validated Brave command line or Thunderbird environment.
+- Brave bounded discovery skips only AT-SPI null objects or individual objects returning `UnknownMethod` for `GetRoleName`. Required frame, tab-list, selected-tab, and ambiguity checks remain strict.
+
 ## Automated validation
 
 Run:
@@ -32,9 +41,25 @@ RUSTFLAGS="-D warnings" cargo build --release
 git diff --check
 ```
 
-The suite covers multi-document/final/base-only/unknown decisions, ambiguous frame matching, cache invalidation, per-window Brave association, variant/PWA separation, Thunderbird base semantics, and dedicated close-window input classification.
+The suite covers multi-document/final/base-only/unknown decisions, ambiguous frame matching, unsupported discovery-object handling, cache invalidation, per-window Brave association, launch opt-in diagnostics, variant/PWA separation, Thunderbird base semantics, and dedicated close-window input classification.
 
 Result: **76 tests passed**, with warnings denied. The optimized release build and `git diff --check` also passed. `rustfmt` was unavailable and was not installed solely for this milestone.
+
+Corrective validation is recorded below after the original 76-test result; it does not rewrite the earlier milestone evidence.
+
+Corrective automated result: **82 tests passed** with warnings denied. The optimized release build, POSIX shell syntax checks, `git diff --check`, isolated installer/uninstaller fixture, installed desktop-file validation, and user-systemd unit validation passed. The added PWA test proves logical-window-only quit, shared-process safety, and Browser/Origin executable separation.
+
+## Launch regression validation
+
+- [x] Installer wraps both currently installed PWA launchers with the correct variant, preserving all arguments; a live simulated regeneration was repaired automatically by the path unit.
+- [x] Uninstaller fixture restores exact originals and preserves a customized launcher while removing its wrapper dependency.
+- [ ] Brave Origin normal-first process contains `--force-renderer-accessibility=basic`; three tabs close to one, final Command+W hides, and restore returns the same window. The managed launcher is correct, but the existing Plank item pins the absolute vendor desktop file and therefore bypassed the user override. A live attempt to rewrite Plank was reverted after Plank removed/renamed the item; MacLife no longer reads, watches, or changes Plank configuration.
+- [x] Brave Origin PWA-first PID 82979 contained the opt-in, Default profile, and GitHub app ID; the normal window joined the same process, tabs closed 3 -> 2 -> 1 -> hidden, restore returned XID `0x05800017`, and GitHub remained a separate logical application.
+- [x] Brave Browser PWA-first PID 92470 contained the opt-in, Default profile, and WhatsApp app ID; its normal window closed 3 -> 2 -> 1 -> hidden while WhatsApp remained separate.
+- [x] GitHub and WhatsApp Command+Q closed only the focused PWA window. Their respective normal Brave windows/processes remained; no process signal was used.
+- [x] Thunderbird managed launch PID 97850 contained `GNOME_ACCESSIBILITY=1`; message tabs closed 2 -> 1 -> 0/Inbox-only, then BaseOnly Inbox hid and restored as XID `0x0120002c`.
+- [ ] After a real logout/login or reboot, session-restored Thunderbird contains `GNOME_ACCESSIBILITY=1` before any manual relaunch; message-tab and BaseOnly behavior work immediately.
+- [ ] Global toolkit accessibility remains false, all three vendor desktop hashes are unchanged, one MacLife daemon remains healthy, and idle CPU/RSS show no regression.
 
 Native application shortcuts are dispatched on the dedicated lifecycle key's core release. Live testing found that dispatching cached Brave Ctrl+W actions on F13 press could occur while F13 was still down; the initial uncached action had hidden this race by taking longer. Release dispatch removed the race without a guessed delay.
 

@@ -19,13 +19,17 @@ The installer builds an optimized binary, then installs only user-owned files:
 - `~/.local/libexec/maclife-brave-browser`
 - `~/.local/libexec/maclife-brave-origin`
 - `~/.local/libexec/maclife-thunderbird`
+- `~/.local/libexec/maclife-launcher-refresh`
+- `~/.local/libexec/maclife-session-commands/thunderbird`
 - `~/.config/systemd/user/maclife.service`
+- `~/.config/systemd/user/maclife-launcher-refresh.{path,service}`
 - `~/.config/autostart/maclife.desktop`
 - user-level desktop overrides for Brave Browser, Brave Origin, and Thunderbird
+- a marked, reversible `~/.xsessionrc` block that adds only the Thunderbird session shim directory to graphical-session `PATH`
 
-If a destination already contains different content, the installer first creates a timestamped backup next to it. Original user desktop launchers are also recorded in `~/.local/share/maclife/launcher-backups` and restored by the uninstaller; vendor files in `/usr/share/applications` are never modified. It starts MacLife immediately when invoked from an active X11 session; use `./scripts/install-user.sh --no-start` to defer startup until the next XFCE login. No root access is used.
+If a destination already contains different content, the installer first creates a timestamped backup next to it. Original user desktop launchers are also recorded in `~/.local/share/maclife/launcher-backups` and restored by the uninstaller; Brave web-app launcher originals are recorded separately in `~/.local/share/maclife/pwa-launcher-backups`. Vendor files in `/usr/share/applications` are never modified. It starts MacLife immediately when invoked from an active X11 session; use `./scripts/install-user.sh --no-start` to defer startup until the next XFCE login. No root access is used.
 
-The XFCE autostart entry runs a small session bridge. It verifies X11, imports the live `DISPLAY`, `XAUTHORITY`, desktop, and D-Bus variables into the systemd user manager, clears any previous rate-limit failure, and starts `maclife.service`. There is no startup sleep. MacLife does not depend on Toshy's service: it can start before Toshy's virtual keyboard appears and dynamically refreshes XInput devices when Toshy starts or restarts.
+The XFCE autostart entry runs a small session bridge. It verifies X11, imports the live `DISPLAY`, `XAUTHORITY`, desktop, and D-Bus variables into the systemd user manager, refreshes Brave-generated launchers, clears any previous rate-limit failure, and starts `maclife.service`. A user path unit repeats that refresh when Brave creates or replaces a web-app launcher; it performs no process scanning. There is no startup sleep. MacLife does not depend on Toshy's service: it can start before Toshy's virtual keyboard appears and dynamically refreshes XInput devices when Toshy starts or restarts.
 
 Daily status and logs:
 
@@ -45,7 +49,7 @@ To replace the installed binary and support files after an update, rerun the ins
 ./scripts/uninstall-user.sh
 ```
 
-The uninstaller leaves timestamped backups in place.
+The uninstaller restores exact managed launcher snapshots. If a managed Brave web-app launcher was subsequently customized, it preserves those edits, removes the MacLife wrapper dependency only, and leaves a timestamped conflict backup. Deleted web-apps are not recreated. Timestamped backups remain in place.
 
 ## Development and diagnostics
 
@@ -66,7 +70,7 @@ cargo run -- restore featherpad
 
 The normal report includes the focused XID, title, normalized application identity, `WM_CLASS`, PID and validation result, client leader, window type/state, transient relationship, and the count/list of meaningful windows in the same application.
 
-Verbose mode adds one line for every managed client, explaining whether it was meaningful, attached, or excluded and which grouping rule matched it to the focused application.
+Verbose mode adds one line for every managed client, explaining whether it was meaningful, attached, or excluded and which grouping rule matched it to the focused application. For Brave and Thunderbird it also reports AT-SPI availability and whether the validated running process actually contains its required launch opt-in.
 
 `run` passively grabs the dedicated X11 keycodes 191, 192, and 195. The Toshy mapping, active configuration path, and backup path are documented in [docs/toshy-control-channel.md](docs/toshy-control-channel.md). The installed service runs the equivalent of `maclife run`; manual `cargo run -- run` is only for development and will refuse while the service owns the singleton lock. Always use `--dry-run` first during development: it logs the selected action but never closes, hides, quits, or restores a window.
 
@@ -103,11 +107,13 @@ Shift+Command+W is a separate top-level-window operation. Brave performs native 
 The installer creates user-level desktop overrides that preserve every vendor launcher argument while routing normal launches through narrow wrappers:
 
 - Brave Browser and Brave Origin use Chromium's documented `--force-renderer-accessibility=basic` mode. This exposes the browser tab strip without requesting the complete web-content tree.
-- Thunderbird receives `GNOME_ACCESSIBILITY=1` only in its process environment.
+- Thunderbird receives `GNOME_ACCESSIBILITY=1` only in its process environment. XFCE session restore records the bare `WM_COMMAND` value `thunderbird`, so a marked `~/.xsessionrc` block prepends a MacLife-specific directory containing only that Thunderbird shim to the graphical-session `PATH`.
 
-The desktop-global `toolkit-accessibility` setting is not changed. Already-running or manually launched unopted instances remain supported only when they expose healthy AT-SPI state; otherwise Command+W refuses with a relaunch explanation. Custom Brave PWA desktop files are not rewritten. Spotify remains a distinct window-only lifecycle identity and cannot become a browser-tab or process-signal target.
+Brave-generated user PWA/web-app launchers are conservatively recognized by their exact Brave executable and rewritten to the corresponding Browser or Origin wrapper while preserving `--profile-directory`, `--app-id`, and every other argument. Variant separation is never inferred from a shared process. Chromium's stable profile/app-id filename and its shortcut update path mean Brave may replace the same launcher later, so the event-driven refresher reapplies the wrapper and retains the first observed original for rollback. Ambiguous or unrelated launchers are refused. See Chromium's [Linux web-app shortcut implementation](https://chromium.googlesource.com/chromium/src/+/refs/heads/lkgr/chrome/browser/web_applications/os_integration/web_app_shortcut_linux.cc) and [shortcut interface](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/web_applications/os_integration/web_app_shortcut_linux.h).
 
-MacLife performs bounded discovery only on a lifecycle command, then caches the matched bus/frame/tab-list identifiers for the X11 window. Cached Brave commands query only the known frame and tab-list subtree. Thunderbird's hidden one-tab strip is recognized as `BaseOnly` only after matching a healthy Mail frame; a generic missing tab list is never treated as one. There is no polling loop.
+The desktop-global `toolkit-accessibility` setting is not changed. Already-running or manually launched unopted instances remain supported only when they expose healthy AT-SPI state; otherwise Command+W refuses with a relaunch explanation. Spotify remains a distinct window-only lifecycle identity and cannot become a browser-tab or process-signal target.
+
+MacLife performs bounded discovery only on a lifecycle command, then caches the matched bus/frame/tab-list identifiers for the X11 window. A discovery-only AT-SPI null object, or one object that lacks `GetRoleName`, is skipped; other D-Bus failures still abort discovery. Frame association, the single tab-list proof, selected-tab validation, and cached-object checks remain strict, so skipping an unsupported node cannot manufacture a tab count. Cached Brave commands query only the known frame and tab-list subtree. Thunderbird's hidden one-tab strip is recognized as `BaseOnly` only after matching a healthy Mail frame; a generic missing tab list is never treated as one. There is no polling loop.
 
 Narrow exceptions remain because their implementation is safer than the generic mechanism:
 
@@ -135,8 +141,9 @@ Current compatibility behavior:
 | GIMP 3 | `gimp` | `gimp-3-0` | Native close request for validated GIMP windows |
 | LibreOffice | module identities such as `libreoffice-writer` and `libreoffice-calc` | `soffice-bin` | Native close requests for every validated LibreOffice family window |
 | Spotify Brave web app | `spotifyweb` | `brave-browser` | Native close request for Spotify windows only; never signal Brave |
+| Brave-generated PWA | `brave-origin-crx-*` or `brave-browser-crx-*` | `brave-browser` plus the exact matching Origin/Browser executable | Native close requests for that logical PWA only; never signal Brave |
 
-Native window close is intentional. It preserves application save/confirmation behavior and is safer than SIGTERM for these applications. LibreOffice Writer and Calc remain distinct window identities for reporting and focused Command+W, but their shared `WM_CLIENT_LEADER`, PID, and suite lifecycle make Command+Q a whole-LibreOffice-family action. The Spotify adapter is safe even if a browser process is shared: it never sends a process signal and never selects an unrelated Brave window.
+Native window close is intentional. It preserves application save/confirmation behavior and is safer than SIGTERM for these applications. LibreOffice Writer and Calc remain distinct window identities for reporting and focused Command+W, but their shared `WM_CLIENT_LEADER`, PID, and suite lifecycle make Command+Q a whole-LibreOffice-family action. Spotify and generic Brave PWA adapters are safe even if a browser process is shared: they never send a process signal and never select an unrelated Brave window. Generic PWA matching retains the concrete Browser/Origin class prefix and requires that variant's exact executable path.
 
 Adapter precedence is deterministic:
 
