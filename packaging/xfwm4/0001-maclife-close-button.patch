@@ -1,0 +1,155 @@
+From: MacLife downstream prototype <maclife@localhost>
+Subject: Route opted-in SSD close buttons through MacLife
+
+Keep stock behavior unless /general/maclife_close_button is enabled. When it
+is enabled, validate the screen-specific MacLife manager selection and protocol
+version, then send the exact client XID. Missing, incompatible, or failed
+delivery keeps the window open and emits a warning/beep.
+---
+ src/client.c | 115 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 114 insertions(+), 1 deletion(-)
+
+diff --git a/src/client.c b/src/client.c
+index 2b85066..c234707 100644
+--- a/src/client.c
++++ b/src/client.c
+@@ -90,6 +90,12 @@
+     EnterWindowMask|\
+     LeaveWindowMask
+ 
++#define MACLIFE_CLOSE_SETTING          "/general/maclife_close_button"
++#define MACLIFE_MANAGER_SELECTION      "_MACLIFE_LIFECYCLE_MANAGER_S%d"
++#define MACLIFE_PROTOCOL_VERSION_ATOM  "_MACLIFE_LIFECYCLE_VERSION"
++#define MACLIFE_CLOSE_REQUEST_ATOM     "_MACLIFE_CLOSE_REQUEST"
++#define MACLIFE_PROTOCOL_VERSION       1L
++
+ /* Useful macros */
+ #define START_ICONIC(c) \
+     ((c->wmhints) && \
+@@ -120,6 +126,107 @@ clientUpdateIconPix (Client *c);
+ static gboolean
+ clientNewMaxSize (Client *c, XWindowChanges *wc, GdkRectangle);
+ 
++static gboolean
++clientMaclifeCloseFailure (Client *c, const gchar *reason)
++{
++    g_warning ("MacLife close-button request for client 0x%lx failed: %s; window kept open",
++               c->window, reason);
++    myDisplayBeep (c->screen_info->display_info);
++    return FALSE;
++}
++
++static gboolean
++clientRequestMaclifeClose (Client *c)
++{
++    static guint32 request_id = 0;
++    ScreenInfo *screen_info;
++    DisplayInfo *display_info;
++    Display *dpy;
++    Window manager;
++    Atom selection;
++    Atom version_atom;
++    Atom request_atom;
++    Atom actual_type;
++    gint actual_format;
++    gulong nitems;
++    gulong bytes_after;
++    guchar *property;
++    gchar selection_name[64];
++    XClientMessageEvent message;
++    gint status;
++    gint xerror;
++
++    g_return_val_if_fail (c != NULL, FALSE);
++
++    screen_info = c->screen_info;
++    display_info = screen_info->display_info;
++    dpy = display_info->dpy;
++    g_snprintf (selection_name, sizeof (selection_name),
++                MACLIFE_MANAGER_SELECTION, screen_info->screen);
++    selection = XInternAtom (dpy, selection_name, False);
++    manager = XGetSelectionOwner (dpy, selection);
++    if (manager == None)
++    {
++        return clientMaclifeCloseFailure (c, "compatible manager is absent");
++    }
++
++    version_atom = XInternAtom (dpy, MACLIFE_PROTOCOL_VERSION_ATOM, False);
++    property = NULL;
++    actual_type = None;
++    actual_format = 0;
++    nitems = 0;
++    bytes_after = 0;
++    myDisplayErrorTrapPush (display_info);
++    status = XGetWindowProperty (dpy, manager, version_atom,
++                                 0, 1, False, XA_CARDINAL,
++                                 &actual_type, &actual_format,
++                                 &nitems, &bytes_after, &property);
++    xerror = myDisplayErrorTrapPop (display_info);
++    if ((status != Success) || (xerror != Success) ||
++        (actual_type != XA_CARDINAL) || (actual_format != 32) ||
++        (nitems != 1) || (property == NULL))
++    {
++        if (property != NULL)
++        {
++            XFree (property);
++        }
++        return clientMaclifeCloseFailure (c, "manager version is unavailable");
++    }
++    if (*((gulong *) property) != MACLIFE_PROTOCOL_VERSION)
++    {
++        XFree (property);
++        return clientMaclifeCloseFailure (c, "manager protocol version is incompatible");
++    }
++    XFree (property);
++
++    request_atom = XInternAtom (dpy, MACLIFE_CLOSE_REQUEST_ATOM, False);
++    request_id++;
++    if (request_id == 0)
++    {
++        request_id++;
++    }
++    memset (&message, 0, sizeof (message));
++    message.type = ClientMessage;
++    message.display = dpy;
++    message.window = manager;
++    message.message_type = request_atom;
++    message.format = 32;
++    message.data.l[0] = MACLIFE_PROTOCOL_VERSION;
++    message.data.l[1] = (glong) c->window;
++    message.data.l[2] = (glong) myDisplayGetCurrentTime (display_info);
++    message.data.l[3] = (glong) request_id;
++
++    myDisplayErrorTrapPush (display_info);
++    status = XSendEvent (dpy, manager, False, NoEventMask, (XEvent *) &message);
++    xerror = myDisplayErrorTrapPop (display_info);
++    if (!status || (xerror != Success))
++    {
++        return clientMaclifeCloseFailure (c, "request delivery failed");
++    }
++    XFlush (dpy);
++    return TRUE;
++}
++
+ Display *
+ clientGetXDisplay (Client *c)
+ {
+@@ -4279,7 +4386,15 @@ clientButtonPress (Client *c, Window w, XfwmEventButton *event)
+                 }
+                 break;
+             case CLOSE_BUTTON:
+-                clientClose (c);
++                if (!xfconf_channel_get_bool (screen_info->xfwm4_channel,
++                                              MACLIFE_CLOSE_SETTING, FALSE))
++                {
++                    clientClose (c);
++                }
++                else
++                {
++                    clientRequestMaclifeClose (c);
++                }
+                 break;
+             case MAXIMIZE_BUTTON:
+                 if (CLIENT_CAN_MAXIMIZE_WINDOW (c))
+-- 
+2.47.2
