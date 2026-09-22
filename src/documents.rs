@@ -1,4 +1,5 @@
 use crate::model::{Inspection, WindowFacts, WindowGeometry};
+use crate::process;
 use std::collections::{HashMap, VecDeque};
 use zbus::blocking::{
     connection::Builder as ConnectionBuilder, proxy::Builder as ProxyBuilder, Connection, Proxy,
@@ -14,6 +15,7 @@ const SCREEN_COORDINATES: u32 = 0;
 const SELECTED_STATE_BIT: u32 = 1 << 23;
 const DISCOVERY_NODE_LIMIT: usize = 192;
 const DISCOVERY_DEPTH_LIMIT: usize = 7;
+const UNKNOWN_METHOD_ERROR: &str = "org.freedesktop.DBus.Error.UnknownMethod";
 
 type AccessibleRef = (String, OwnedObjectPath);
 
@@ -154,6 +156,64 @@ pub fn adapter_for(identity: &str) -> Option<&'static DocumentLifecycleAdapter> 
     ADAPTERS.iter().find(|adapter| adapter.identity == identity)
 }
 
+pub fn launch_opt_in_status(inspection: &Inspection) -> &'static str {
+    let window = &inspection.identity_window;
+    if !window.pid_validated {
+        return "unavailable";
+    }
+    match inspection.app_identity.as_str() {
+        "brave-origin" | "brave-browser" => window
+            .process
+            .as_ref()
+            .and_then(|process| process.command_line.as_deref())
+            .map_or("unavailable", |command_line| {
+                if command_line
+                    .split_whitespace()
+                    .any(|argument| argument == "--force-renderer-accessibility=basic")
+                {
+                    "yes"
+                } else {
+                    "no"
+                }
+            }),
+        "thunderbird-default" => {
+            let Some(pid) = window.pid else {
+                return "unavailable";
+            };
+            let Some(environment) = process::read_environment(pid) else {
+                return "unavailable";
+            };
+            if environment
+                .iter()
+                .any(|(name, value)| name == "GNOME_ACCESSIBILITY" && value == "1")
+            {
+                "yes"
+            } else {
+                "no"
+            }
+        }
+        _ => "not-applicable",
+    }
+}
+
+fn is_null_accessible_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/org/a11y/atspi/null" | "/org/a11y/atspi/accessible/null"
+    )
+}
+
+fn is_skippable_discovery_error(path: &str, error_name: Option<&str>) -> bool {
+    is_null_accessible_path(path) || error_name == Some(UNKNOWN_METHOD_ERROR)
+}
+
+fn method_error_name(error: &zbus::Error) -> Option<&str> {
+    match error {
+        zbus::Error::MethodError(name, _, _) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FrameCandidate {
     destination: String,
@@ -261,6 +321,24 @@ impl AtspiDocumentProvider {
             .map_err(|error| error.to_string())
     }
 
+    fn discovery_role(&self, destination: &str, path: &str) -> Result<Option<String>, String> {
+        if is_null_accessible_path(path) {
+            return Ok(None);
+        }
+        match self
+            .proxy(destination, path, ACCESSIBLE_INTERFACE)?
+            .call("GetRoleName", &())
+        {
+            Ok(role) => Ok(Some(role)),
+            Err(error)
+                if is_skippable_discovery_error(path, method_error_name(&error)) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn name(&self, destination: &str, path: &str) -> Result<String, String> {
         self.proxy(destination, path, ACCESSIBLE_INTERFACE)?
             .get_property("Name")
@@ -311,7 +389,11 @@ impl AtspiDocumentProvider {
                 self.children(&destination, application_path.as_str())?
             {
                 let child_path = child_path.to_string();
-                if self.role(&child_destination, &child_path)? != "frame" {
+                if self
+                    .discovery_role(&child_destination, &child_path)?
+                    .as_deref()
+                    != Some("frame")
+                {
                     continue;
                 }
                 frames.push(FrameCandidate {
@@ -363,7 +445,9 @@ impl AtspiDocumentProvider {
             if visited > DISCOVERY_NODE_LIMIT {
                 return Err("bounded AT-SPI tab discovery exceeded its node limit".to_string());
             }
-            let role = self.role(&node_destination, &node_path)?;
+            let Some(role) = self.discovery_role(&node_destination, &node_path)? else {
+                continue;
+            };
             let name = self.name(&node_destination, &node_path)?;
             if is_thunderbird_mail_marker(&role, &name) {
                 mail_marker = true;
@@ -662,10 +746,11 @@ fn select_frame(
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_for, close_decision, select_frame, CachedFrame, DocumentCloseDecision,
-        InternalDocumentState, ProviderCache, WindowGeometry,
+        adapter_for, close_decision, is_skippable_discovery_error, launch_opt_in_status,
+        select_frame, CachedFrame, DocumentCloseDecision, InternalDocumentState, ProviderCache,
+        WindowGeometry, UNKNOWN_METHOD_ERROR,
     };
-    use crate::model::WindowFacts;
+    use crate::model::{Inspection, ProcessInfo, WindowFacts};
 
     fn known(count: usize) -> InternalDocumentState {
         InternalDocumentState::Known {
@@ -767,6 +852,85 @@ mod tests {
         let mut duplicate = candidate.clone();
         duplicate.path = "/frame/two".to_string();
         assert!(select_frame(&window, &[candidate, duplicate]).is_err());
+    }
+
+    #[test]
+    fn unsupported_discovery_object_is_skipped_without_weakening_other_errors() {
+        assert!(is_skippable_discovery_error(
+            "/org/a11y/atspi/null",
+            None
+        ));
+        assert!(is_skippable_discovery_error(
+            "/org/a11y/atspi/accessible/99",
+            Some(UNKNOWN_METHOD_ERROR)
+        ));
+        assert!(!is_skippable_discovery_error(
+            "/org/a11y/atspi/accessible/99",
+            Some("org.freedesktop.DBus.Error.NoReply")
+        ));
+        assert!(!is_skippable_discovery_error(
+            "/org/a11y/atspi/accessible/99",
+            None
+        ));
+    }
+
+    #[test]
+    fn unsupported_object_does_not_prevent_valid_frame_selection() {
+        assert!(is_skippable_discovery_error(
+            "/org/a11y/atspi/null",
+            Some(UNKNOWN_METHOD_ERROR)
+        ));
+        let window = WindowFacts::test_window(10, "Brave-browser");
+        let valid = super::FrameCandidate {
+            destination: ":1.1".to_string(),
+            path: "/org/a11y/atspi/accessible/1".to_string(),
+            title: "window 10".to_string(),
+            geometry: window.geometry.expect("geometry"),
+        };
+        assert_eq!(
+            select_frame(&window, &[valid])
+                .expect("valid frame remains discoverable")
+                .path,
+            "/org/a11y/atspi/accessible/1"
+        );
+    }
+
+    #[test]
+    fn provider_unavailability_remains_unknown_and_refuses() {
+        let state = InternalDocumentState::Unknown {
+            reason: "AT-SPI unavailable".to_string(),
+        };
+        assert!(matches!(
+            close_decision(&state),
+            DocumentCloseDecision::Refuse(reason) if reason == "AT-SPI unavailable"
+        ));
+    }
+
+    #[test]
+    fn brave_launch_opt_in_diagnostic_uses_validated_main_process() {
+        let mut window = WindowFacts::test_window(10, "Brave-browser");
+        window.pid = Some(20);
+        window.pid_validated = true;
+        window.process = Some(ProcessInfo {
+            pid: 20,
+            uid: 1000,
+            parent_pid: Some(1),
+            name: "brave".to_string(),
+            executable: Some("/opt/brave.com/brave/brave".to_string()),
+            command_line: Some(
+                "/opt/brave.com/brave/brave --force-renderer-accessibility=basic"
+                    .to_string(),
+            ),
+        });
+        let inspection = Inspection {
+            focused_xid: window.xid,
+            focused_window: window.clone(),
+            identity_window: window.clone(),
+            app_identity: "brave-browser".to_string(),
+            meaningful_windows: vec![window],
+            decisions: Vec::new(),
+        };
+        assert_eq!(launch_opt_in_status(&inspection), "yes");
     }
 
     #[test]

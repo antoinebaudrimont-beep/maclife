@@ -67,9 +67,27 @@ pub fn read_process(pid: u32) -> Option<ProcessInfo> {
     })
 }
 
+fn parse_environment(bytes: &[u8]) -> Vec<(String, String)> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .filter_map(|field| {
+            let separator = field.iter().position(|byte| *byte == b'=')?;
+            let name = String::from_utf8_lossy(&field[..separator]).into_owned();
+            let value = String::from_utf8_lossy(&field[separator + 1..]).into_owned();
+            Some((name, value))
+        })
+        .collect()
+}
+
+pub fn read_environment(pid: u32) -> Option<Vec<(String, String)>> {
+    let bytes = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(parse_environment(&bytes))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_status;
+    use super::{parse_environment, parse_status};
 
     #[test]
     fn parses_linux_status_fields() {
@@ -78,5 +96,18 @@ mod tests {
         assert_eq!(status.name, "brave");
         assert_eq!(status.uid, 1000);
         assert_eq!(status.parent_pid, Some(42));
+    }
+
+    #[test]
+    fn parses_linux_process_environment() {
+        let environment = parse_environment(b"PATH=/usr/bin\0GNOME_ACCESSIBILITY=1\0EMPTY=\0");
+        assert_eq!(
+            environment,
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("GNOME_ACCESSIBILITY".to_string(), "1".to_string()),
+                ("EMPTY".to_string(), String::new()),
+            ]
+        );
     }
 }

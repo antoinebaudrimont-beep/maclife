@@ -31,6 +31,14 @@ fn run() -> Result<(), DynError> {
             print!("{}", report::render(&inspection, verbose));
             if documents::adapter_for(&inspection.app_identity).is_some() {
                 let mut provider = AtspiDocumentProvider::connect();
+                if verbose {
+                    println!(
+                        "Internal document diagnostics: accessibility={} provider={} launch-opt-in-detected={}",
+                        provider.availability(),
+                        inspection.app_identity,
+                        documents::launch_opt_in_status(&inspection)
+                    );
+                }
                 let state = provider.inspect(&inspection);
                 println!("Internal documents: {}", state.summary());
             }

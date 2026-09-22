@@ -287,6 +287,12 @@ fn handle_close(
             state.concise_summary()
         );
         if options.verbose {
+            println!(
+                "internal-documents accessibility={} provider={} launch-opt-in-detected={}",
+                document_provider.availability(),
+                inspection.app_identity,
+                documents::launch_opt_in_status(&inspection)
+            );
             println!("internal-documents {}", state.summary());
             print!("{}", report::render(&inspection, true));
         }
