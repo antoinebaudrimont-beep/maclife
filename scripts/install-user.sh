@@ -48,6 +48,48 @@ record_launcher_origin() {
     fi
 }
 
+install_xsession_command_path() {
+    target_file=${HOME}/.xsessionrc
+    original_file="$launcher_state_dir/xsessionrc.original"
+    created_file="$launcher_state_dir/xsessionrc.created"
+    managed_file="$launcher_state_dir/xsessionrc.managed"
+    generated_file="$temporary_dir/xsessionrc"
+    start_marker='# >>> MacLife Thunderbird session restore >>>'
+    end_marker='# <<< MacLife Thunderbird session restore <<<'
+
+    if [ ! -e "$original_file" ] && [ ! -e "$created_file" ]; then
+        if [ -e "$target_file" ]; then
+            cp -p -- "$target_file" "$original_file"
+        else
+            : >"$created_file"
+        fi
+    fi
+    if [ -e "$target_file" ]; then
+        cp -p -- "$target_file" "$generated_file"
+    else
+        : >"$generated_file"
+    fi
+    if ! grep -Fq "$start_marker" "$generated_file"; then
+        if [ -s "$generated_file" ]; then
+            printf '\n' >>"$generated_file"
+        fi
+        cat >>"$generated_file" <<'EOF'
+# >>> MacLife Thunderbird session restore >>>
+# Keep this directory narrow: it contains only the Thunderbird accessibility shim.
+if [ -d "$HOME/.local/libexec/maclife-session-commands" ]; then
+    PATH="$HOME/.local/libexec/maclife-session-commands:$PATH"
+    export PATH
+fi
+# <<< MacLife Thunderbird session restore <<<
+EOF
+    elif ! grep -Fq "$end_marker" "$generated_file"; then
+        printf 'Refusing malformed MacLife block in %s\n' "$target_file" >&2
+        exit 1
+    fi
+    install_atomic "$generated_file" "$target_file" 0644
+    cp -p -- "$target_file" "$managed_file"
+}
+
 install_launcher_override() {
     vendor_file=$1
     launcher_name=$2
@@ -72,8 +114,9 @@ unit_dir=${HOME}/.config/systemd/user
 autostart_dir=${HOME}/.config/autostart
 application_dir=${HOME}/.local/share/applications
 launcher_state_dir=${HOME}/.local/share/maclife/launcher-backups
+session_command_dir=${HOME}/.local/libexec/maclife-session-commands
 mkdir -p -- "$binary_dir" "$helper_dir" "$unit_dir" "$autostart_dir" \
-    "$application_dir" "$launcher_state_dir"
+    "$application_dir" "$launcher_state_dir" "$session_command_dir"
 
 temporary_dir=$(mktemp -d)
 trap 'rm -rf -- "$temporary_dir"' EXIT HUP INT TERM
@@ -91,7 +134,15 @@ install_atomic "$repo_dir/packaging/maclife-brave-origin" \
     "$helper_dir/maclife-brave-origin" 0755
 install_atomic "$repo_dir/packaging/maclife-thunderbird" \
     "$helper_dir/maclife-thunderbird" 0755
+install_atomic "$repo_dir/packaging/maclife-launcher-refresh" \
+    "$helper_dir/maclife-launcher-refresh" 0755
+install_atomic "$repo_dir/packaging/maclife-thunderbird" \
+    "$session_command_dir/thunderbird" 0755
 install_atomic "$repo_dir/packaging/maclife.service" "$unit_dir/maclife.service" 0644
+install_atomic "$repo_dir/packaging/maclife-launcher-refresh.service" \
+    "$unit_dir/maclife-launcher-refresh.service" 0644
+install_atomic "$repo_dir/packaging/maclife-launcher-refresh.path" \
+    "$unit_dir/maclife-launcher-refresh.path" 0644
 install_atomic "$desktop_temp" "$autostart_dir/maclife.desktop" 0644
 install_launcher_override \
     /usr/share/applications/brave-browser.desktop \
@@ -105,10 +156,13 @@ install_launcher_override \
     /usr/share/applications/thunderbird.desktop \
     thunderbird.desktop \
     "$helper_dir/maclife-thunderbird"
+install_xsession_command_path
+"$helper_dir/maclife-launcher-refresh"
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$application_dir"
 fi
 systemctl --user daemon-reload
+systemctl --user enable --now maclife-launcher-refresh.path
 
 if [ "$start_service" = true ] && [ "${XDG_SESSION_TYPE:-}" = "x11" ] \
     && [ -n "${DISPLAY:-}" ]; then

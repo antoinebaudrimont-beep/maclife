@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for regenerated Brave PWA launchers
+
+[Path]
+PathChanged=%h/.local/share/applications
+Unit=maclife-launcher-refresh.service
+
+[Install]
+WantedBy=default.target

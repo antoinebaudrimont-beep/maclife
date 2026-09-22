@@ -18,5 +18,10 @@ if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS
 fi
 
+launcher_refresh=${HOME}/.local/libexec/maclife-launcher-refresh
+if [ -x "$launcher_refresh" ]; then
+    "$launcher_refresh"
+fi
+
 systemctl --user reset-failed maclife.service >/dev/null 2>&1 || true
 exec systemctl --user start maclife.service

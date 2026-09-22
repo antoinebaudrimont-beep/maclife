@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh MacLife Brave PWA launcher wrappers
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/libexec/maclife-launcher-refresh

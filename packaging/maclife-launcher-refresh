@@ -1,0 +1,238 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+application_dir=${HOME}/.local/share/applications
+state_dir=${HOME}/.local/share/maclife/pwa-launcher-backups
+helper_dir=${HOME}/.local/libexec
+timestamp=$(date +%Y%m%d-%H%M%S)
+
+mkdir -p -- "$application_dir" "$state_dir"
+
+has_exec() {
+    check_file=$1
+    check_executable=$2
+    awk -v expected="$check_executable" '
+        /^Exec=/ {
+            command = substr($0, 6)
+            split(command, fields, /[[:space:]]/)
+            if (fields[1] == expected) {
+                found = 1
+            }
+        }
+        END { exit found ? 0 : 1 }
+    ' "$check_file"
+}
+
+launcher_variant() {
+    desktop_file=$1
+    origin=false
+    browser=false
+    for executable in \
+        /opt/brave.com/brave-origin/brave-origin \
+        /usr/bin/brave-origin-stable \
+        "$helper_dir/maclife-brave-origin"
+    do
+        if has_exec "$desktop_file" "$executable"; then
+            origin=true
+        fi
+    done
+    for executable in \
+        /opt/brave.com/brave/brave-browser \
+        /usr/bin/brave-browser-stable \
+        "$helper_dir/maclife-brave-browser"
+    do
+        if has_exec "$desktop_file" "$executable"; then
+            browser=true
+        fi
+    done
+    if [ "$origin" = true ] && [ "$browser" = false ]; then
+        printf '%s\n' origin
+    elif [ "$browser" = true ] && [ "$origin" = false ]; then
+        printf '%s\n' browser
+    elif [ "$origin" = true ] && [ "$browser" = true ]; then
+        return 2
+    else
+        return 1
+    fi
+}
+
+rewrite_to_wrapper() {
+    source_file=$1
+    target_file=$2
+    variant=$3
+    if [ "$variant" = origin ]; then
+        wrapper="$helper_dir/maclife-brave-origin"
+        first=/opt/brave.com/brave-origin/brave-origin
+        second=/usr/bin/brave-origin-stable
+    else
+        wrapper="$helper_dir/maclife-brave-browser"
+        first=/opt/brave.com/brave/brave-browser
+        second=/usr/bin/brave-browser-stable
+    fi
+    awk -v wrapper="$wrapper" -v first="$first" -v second="$second" '
+        /^Exec=/ {
+            command = substr($0, 6)
+            split(command, fields, /[[:space:]]/)
+            if (fields[1] == first || fields[1] == second) {
+                suffix = substr(command, length(fields[1]) + 1)
+                print "Exec=" wrapper suffix
+                next
+            }
+        }
+        { print }
+    ' "$source_file" >"$target_file"
+}
+
+first_direct_exec() {
+    desktop_file=$1
+    awk '
+        /^Exec=/ {
+            command = substr($0, 6)
+            split(command, fields, /[[:space:]]/)
+            if (fields[1] == "/opt/brave.com/brave-origin/brave-origin" ||
+                fields[1] == "/usr/bin/brave-origin-stable" ||
+                fields[1] == "/opt/brave.com/brave/brave-browser" ||
+                fields[1] == "/usr/bin/brave-browser-stable") {
+                print fields[1]
+                exit
+            }
+        }
+    ' "$desktop_file"
+}
+
+rewrite_wrapper_to_exec() {
+    source_file=$1
+    target_file=$2
+    executable=$3
+    awk -v executable="$executable" -v origin="$helper_dir/maclife-brave-origin" \
+        -v browser="$helper_dir/maclife-brave-browser" '
+        /^Exec=/ {
+            command = substr($0, 6)
+            split(command, fields, /[[:space:]]/)
+            if (fields[1] == origin || fields[1] == browser) {
+                suffix = substr(command, length(fields[1]) + 1)
+                print "Exec=" executable suffix
+                next
+            }
+        }
+        { print }
+    ' "$source_file" >"$target_file"
+}
+
+validate_desktop() {
+    desktop_file=$1
+    if command -v desktop-file-validate >/dev/null 2>&1; then
+        desktop-file-validate "$desktop_file"
+    fi
+}
+
+refresh_launchers() {
+    changed=false
+    for launcher in "$application_dir"/brave-*.desktop; do
+        [ -f "$launcher" ] || continue
+        launcher_name=${launcher##*/}
+        case "$launcher_name" in
+            brave-browser.desktop|brave-origin.desktop)
+                continue
+                ;;
+        esac
+        if variant=$(launcher_variant "$launcher"); then
+            :
+        else
+            status=$?
+            if [ "$status" -eq 2 ]; then
+                printf 'MacLife: refusing ambiguous Brave PWA launcher %s\n' "$launcher" >&2
+            fi
+            continue
+        fi
+
+        original_file="$state_dir/$launcher_name.original"
+        managed_file="$state_dir/$launcher_name.managed"
+        variant_file="$state_dir/$launcher_name.variant"
+        wrapper="$helper_dir/maclife-brave-$variant"
+
+        if has_exec "$launcher" "$wrapper"; then
+            if [ -e "$original_file" ]; then
+                cp -p -- "$launcher" "$managed_file"
+                printf '%s\n' "$variant" >"$variant_file"
+            fi
+            continue
+        fi
+        if [ ! -e "$original_file" ]; then
+            cp -p -- "$launcher" "$original_file"
+        fi
+
+        temporary_file="$application_dir/.${launcher_name}.maclife-new-$$.desktop"
+        rewrite_to_wrapper "$launcher" "$temporary_file" "$variant"
+        if cmp -s "$launcher" "$temporary_file"; then
+            rm -f -- "$temporary_file"
+            continue
+        fi
+        chmod 0644 "$temporary_file"
+        validate_desktop "$temporary_file"
+        mv -f -- "$temporary_file" "$launcher"
+        cp -p -- "$launcher" "$managed_file"
+        printf '%s\n' "$variant" >"$variant_file"
+        printf 'MacLife: wrapped Brave %s PWA launcher %s\n' "$variant" "$launcher"
+        changed=true
+    done
+    if [ "$changed" = true ] && command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$application_dir"
+    fi
+}
+
+restore_launchers() {
+    for original_file in "$state_dir"/*.desktop.original; do
+        [ -f "$original_file" ] || continue
+        launcher_name=${original_file##*/}
+        launcher_name=${launcher_name%.original}
+        launcher="$application_dir/$launcher_name"
+        managed_file="$state_dir/$launcher_name.managed"
+
+        if [ ! -e "$launcher" ]; then
+            continue
+        fi
+        if [ -e "$managed_file" ] && cmp -s "$launcher" "$managed_file"; then
+            mv -f -- "$original_file" "$launcher"
+            rm -f -- "$managed_file" "$state_dir/$launcher_name.variant"
+            printf 'MacLife: restored Brave PWA launcher %s\n' "$launcher"
+            continue
+        fi
+
+        executable=$(first_direct_exec "$original_file")
+        if [ -n "$executable" ] && \
+            { has_exec "$launcher" "$helper_dir/maclife-brave-origin" || \
+              has_exec "$launcher" "$helper_dir/maclife-brave-browser"; }
+        then
+            conflict_backup="$launcher.maclife-uninstall-backup-$timestamp"
+            cp -p -- "$launcher" "$conflict_backup"
+            temporary_file="$application_dir/.${launcher_name}.maclife-restore-$$.desktop"
+            rewrite_wrapper_to_exec "$launcher" "$temporary_file" "$executable"
+            chmod 0644 "$temporary_file"
+            validate_desktop "$temporary_file"
+            mv -f -- "$temporary_file" "$launcher"
+            printf 'MacLife: preserved custom launcher edits while removing wrapper dependency; backup: %s\n' \
+                "$conflict_backup"
+        fi
+    done
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$application_dir"
+    fi
+}
+
+case ${1:-refresh} in
+    refresh)
+        [ "$#" -le 1 ] || { printf '%s\n' "Usage: $0 [refresh|--restore-all]" >&2; exit 2; }
+        refresh_launchers
+        ;;
+    --restore-all)
+        [ "$#" -eq 1 ] || { printf '%s\n' "Usage: $0 [refresh|--restore-all]" >&2; exit 2; }
+        restore_launchers
+        ;;
+    *)
+        printf '%s\n' "Usage: $0 [refresh|--restore-all]" >&2
+        exit 2
+        ;;
+esac
