@@ -22,6 +22,7 @@ impl CompatibilityQuit {
 pub struct CompatibilityAdapter {
     pub name: &'static str,
     pub window_identities: &'static [&'static str],
+    pub window_identity_prefixes: &'static [&'static str],
     pub process_identities: &'static [&'static str],
     pub process_executables: &'static [&'static str],
     pub family: Option<&'static str>,
@@ -47,6 +48,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
     CompatibilityAdapter {
         name: "thunderbird",
         window_identities: THUNDERBIRD_WINDOWS,
+        window_identity_prefixes: &[],
         process_identities: &["thunderbird-bin"],
         process_executables: &[],
         family: Some("thunderbird"),
@@ -56,6 +58,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
     CompatibilityAdapter {
         name: "gimp",
         window_identities: GIMP_WINDOWS,
+        window_identity_prefixes: &[],
         process_identities: &["gimp-3-0"],
         process_executables: &[],
         family: Some("gimp"),
@@ -65,6 +68,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
     CompatibilityAdapter {
         name: "libreoffice",
         window_identities: LIBREOFFICE_WINDOWS,
+        window_identity_prefixes: &[],
         process_identities: &["soffice-bin"],
         process_executables: &[],
         family: Some("libreoffice"),
@@ -74,6 +78,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
     CompatibilityAdapter {
         name: "brave-origin",
         window_identities: &["brave-origin"],
+        window_identity_prefixes: &[],
         process_identities: &["brave-browser"],
         process_executables: &["/opt/brave.com/brave-origin/brave"],
         family: Some("brave"),
@@ -83,6 +88,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
     CompatibilityAdapter {
         name: "brave-browser",
         window_identities: &["brave-browser"],
+        window_identity_prefixes: &[],
         process_identities: &["brave-browser"],
         process_executables: &["/opt/brave.com/brave/brave"],
         family: Some("brave"),
@@ -92,18 +98,47 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
     CompatibilityAdapter {
         name: "brave-pwa-spotify",
         window_identities: SPOTIFY_WEB_WINDOWS,
+        window_identity_prefixes: &[],
         process_identities: &["brave-browser"],
         process_executables: &[],
         family: Some("brave-pwa"),
         quit: CompatibilityQuit::CloseLogicalWindows,
         shared_process: true,
     },
+    CompatibilityAdapter {
+        name: "brave-origin-pwa",
+        window_identities: &[],
+        window_identity_prefixes: &["brave-origin-crx-"],
+        process_identities: &["brave-browser"],
+        process_executables: &["/opt/brave.com/brave-origin/brave"],
+        family: Some("brave-pwa"),
+        quit: CompatibilityQuit::CloseLogicalWindows,
+        shared_process: true,
+    },
+    CompatibilityAdapter {
+        name: "brave-browser-pwa",
+        window_identities: &[],
+        window_identity_prefixes: &["brave-browser-crx-"],
+        process_identities: &["brave-browser"],
+        process_executables: &["/opt/brave.com/brave/brave"],
+        family: Some("brave-pwa"),
+        quit: CompatibilityQuit::CloseLogicalWindows,
+        shared_process: true,
+    },
 ];
+
+fn accepts_window_identity(adapter: &CompatibilityAdapter, identity: &str) -> bool {
+    adapter.window_identities.contains(&identity)
+        || adapter
+            .window_identity_prefixes
+            .iter()
+            .any(|prefix| identity.starts_with(prefix))
+}
 
 pub fn adapter_for(identity: &str) -> Option<&'static CompatibilityAdapter> {
     ADAPTERS
         .iter()
-        .find(|adapter| adapter.window_identities.contains(&identity))
+        .find(|adapter| accepts_window_identity(adapter, identity))
 }
 
 fn validate_window(
@@ -111,7 +146,7 @@ fn validate_window(
     window: &WindowFacts,
 ) -> Result<u32, String> {
     let window_identity = normalized_app_identity(window);
-    if !adapter.window_identities.contains(&window_identity.as_str()) {
+    if !accepts_window_identity(adapter, &window_identity) {
         return Err(format!(
             "adapter {} does not accept window identity {window_identity}",
             adapter.name
@@ -165,10 +200,7 @@ pub fn validate_inspection(
     adapter: &CompatibilityAdapter,
     inspection: &Inspection,
 ) -> Result<u32, String> {
-    if !adapter
-        .window_identities
-        .contains(&inspection.app_identity.as_str())
-    {
+    if !accepts_window_identity(adapter, &inspection.app_identity) {
         return Err(format!(
             "adapter {} does not apply to {}",
             adapter.name, inspection.app_identity
@@ -200,9 +232,7 @@ pub fn family_windows(
         .iter()
         .filter(|window| {
             identity::disposition(window) == Disposition::Meaningful
-                && adapter
-                    .window_identities
-                    .contains(&normalized_app_identity(window).as_str())
+                && accepts_window_identity(adapter, &normalized_app_identity(window))
         })
         .cloned()
         .collect();
@@ -260,7 +290,7 @@ mod tests {
         adapter_for, family_windows, validate_inspection, CompatibilityQuit,
     };
     use crate::identity;
-    use crate::model::{ProcessInfo, WindowFacts};
+    use crate::model::{ProcessInfo, WindowFacts, WmClass};
 
     fn process_window_path(
         xid: u32,
@@ -350,6 +380,42 @@ mod tests {
         let inspection = identity::inspect(10, vec![spotify, brave]).expect("inspection");
         assert_eq!(validate_inspection(adapter, &inspection), Ok(500));
         assert_eq!(inspection.meaningful_windows.len(), 1);
+    }
+
+    #[test]
+    fn brave_pwas_close_only_their_logical_windows_and_keep_variants_separate() {
+        let mut origin_pwa = process_window_path(
+            10,
+            "Brave-origin",
+            500,
+            "brave",
+            "/opt/brave.com/brave-origin/brave",
+        );
+        origin_pwa.wm_class = Some(WmClass {
+            instance: "crx_mjoklplbddabcmpepnokjaffbmgbkkgg".to_string(),
+            class: "Brave-origin".to_string(),
+        });
+        let origin_browser = process_window_path(
+            20,
+            "Brave-origin",
+            500,
+            "brave",
+            "/opt/brave.com/brave-origin/brave",
+        );
+        let inspection = identity::inspect(10, vec![origin_pwa, origin_browser])
+            .expect("origin PWA inspection");
+        let adapter = adapter_for(&inspection.app_identity).expect("origin PWA adapter");
+        assert_eq!(adapter.name, "brave-origin-pwa");
+        assert_eq!(adapter.quit, CompatibilityQuit::CloseLogicalWindows);
+        assert!(adapter.shared_process);
+        assert_eq!(validate_inspection(adapter, &inspection), Ok(500));
+        assert_eq!(inspection.meaningful_windows.len(), 1);
+
+        let mut wrong_variant = inspection.identity_window.clone();
+        wrong_variant.process.as_mut().expect("process").executable =
+            Some("/opt/brave.com/brave/brave".to_string());
+        let wrong = identity::inspect(10, vec![wrong_variant]).expect("wrong variant");
+        assert!(validate_inspection(adapter, &wrong).is_err());
     }
 
     #[test]

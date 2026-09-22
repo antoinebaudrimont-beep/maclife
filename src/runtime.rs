@@ -813,6 +813,7 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
             }
             let result = quit_with_compatibility_adapter(adapter, &inspection);
             if result.is_ok() {
+                hidden.forget_identity(&inspection.app_identity);
                 for identity in adapter.window_identities {
                     hidden.forget_identity(identity);
                 }
