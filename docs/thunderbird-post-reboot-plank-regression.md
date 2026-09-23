@@ -98,5 +98,12 @@ vendor launch path. A file rewrite while Plank is running is not a safe fix.
 - [x] Clean Inbox Cmd+Q dispatched `application-adapter/atspi-file-quit` and
   Thunderbird exited. The earlier dirty-draft Cancel test remains valid; no
   process-signal fallback exists.
-- [ ] SSD title-bar X follows the existing internal-document policy.
-- [ ] Same behavior survives a fresh logout/login or reboot without special launch commands.
+- [x] After a real logout/login, one managed Thunderbird pin remained directly
+  after Brave Origin. Its first normal Plank launch produced PID 91971 with
+  `GNOME_ACCESSIBILITY=1` and the managed `MOZ_APP_LAUNCHER`. Cmd+W closed a
+  message tab from a known two-tab state, then hid the BaseOnly window at XID
+  `0x05c0002c`. Restore returned that same XID and PID and cleared the private
+  hidden marker. Clean Cmd+Q dispatched `atspi-file-quit` and Thunderbird exited.
+
+The compact post-login check did not repeat the title-bar X test. Its existing
+exact-XID hook and fail-closed policy were not changed by this launcher repair.
