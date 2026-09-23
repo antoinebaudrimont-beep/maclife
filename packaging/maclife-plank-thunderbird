@@ -1,0 +1,105 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    printf '%s\n' "Usage: $0 install /absolute/path/to/maclife-thunderbird | uninstall" >&2
+    exit 2
+}
+
+config_home=${XDG_CONFIG_HOME:-${HOME}/.config}
+data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
+dockitem=$config_home/plank/dock1/launchers/thunderbird.dockitem
+desktop=$data_home/applications/thunderbird.desktop
+state_dir=$data_home/maclife/plank-launcher-backups
+original=$state_dir/thunderbird.dockitem.original
+managed=$state_dir/thunderbird.dockitem.managed
+vendor_line=Launcher=file:///usr/share/applications/thunderbird.desktop
+managed_line=Launcher=file://$desktop
+timestamp=$(date +%Y%m%d-%H%M%S)
+
+install_pin() {
+    [ "$#" -eq 1 ] || usage
+    wrapper=$1
+    case "$wrapper" in
+        /*) ;;
+        *) usage ;;
+    esac
+    [ -f "$dockitem" ] && [ ! -L "$dockitem" ] || {
+        printf '%s\n' 'No regular pinned Thunderbird Plank launcher to update.'
+        return
+    }
+    [ -f "$desktop" ] && grep -Fq "Exec=$wrapper " "$desktop" || {
+        printf 'Managed Thunderbird desktop launcher is unavailable: %s\n' "$desktop" >&2
+        exit 1
+    }
+    case "$desktop" in
+        *' '*|*'#'*|*'%'*)
+            printf 'Cannot represent desktop path safely as a file URI: %s\n' "$desktop" >&2
+            exit 1
+            ;;
+    esac
+    if [ -e "$original" ] || [ -e "$managed" ]; then
+        if [ -f "$original" ] && [ -f "$managed" ] && cmp -s "$dockitem" "$managed"; then
+            return
+        fi
+        printf 'Refusing modified/incomplete MacLife Plank pin state: %s\n' "$dockitem" >&2
+        exit 1
+    fi
+    if grep -qxF "$managed_line" "$dockitem"; then
+        printf '%s\n' 'Thunderbird Plank pin already uses the managed desktop launcher.'
+        return
+    fi
+    if ! grep -qxF "$vendor_line" "$dockitem"; then
+        printf '%s\n' 'Thunderbird Plank pin uses another launcher; leaving it unchanged.'
+        return
+    fi
+    if [ "$(grep -c '^Launcher=' "$dockitem")" -ne 1 ]; then
+        printf 'Refusing ambiguous Thunderbird Plank pin: %s\n' "$dockitem" >&2
+        exit 1
+    fi
+
+    mkdir -p -- "$state_dir"
+    temporary=$(mktemp "$config_home/plank/dock1/launchers/.thunderbird.maclife-XXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    awk -v old="$vendor_line" -v new="$managed_line" '
+        $0 == old { print new; replaced++; next }
+        { print }
+        END { if (replaced != 1) exit 1 }
+    ' "$dockitem" >"$temporary"
+    chmod 0644 "$temporary"
+    cp -p -- "$dockitem" "$original"
+    mv -f -- "$temporary" "$dockitem"
+    trap - EXIT HUP INT TERM
+    cp -p -- "$dockitem" "$managed"
+    printf 'Routed pinned Thunderbird Plank launcher through %s (effective after Plank restarts with the next session).\n' "$desktop"
+}
+
+uninstall_pin() {
+    [ "$#" -eq 0 ] || usage
+    [ -f "$original" ] || return
+    if [ -f "$dockitem" ] && [ -f "$managed" ] && cmp -s "$dockitem" "$managed"; then
+        mv -f -- "$original" "$dockitem"
+        rm -f -- "$managed"
+        printf '%s\n' 'Restored original Thunderbird Plank launcher.'
+        return
+    fi
+    if [ -f "$dockitem" ] && grep -qxF "$managed_line" "$dockitem"; then
+        conflict=$dockitem.maclife-uninstall-conflict-$timestamp
+        cp -p -- "$dockitem" "$conflict"
+        mv -f -- "$original" "$dockitem"
+        rm -f -- "$managed"
+        printf 'Restored Thunderbird Plank launcher; backed up modified pin to %s\n' "$conflict" >&2
+        return
+    fi
+    printf '%s\n' 'Preserving user-modified Thunderbird Plank launcher.'
+    rm -f -- "$original" "$managed"
+}
+
+[ "$#" -ge 1 ] || usage
+mode=$1
+shift
+case "$mode" in
+    install) install_pin "$@" ;;
+    uninstall) uninstall_pin "$@" ;;
+    *) usage ;;
+esac

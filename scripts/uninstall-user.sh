@@ -73,6 +73,9 @@ fi
 if [ -x "${HOME}/.local/libexec/maclife-xfce-mail-helper" ]; then
     "${HOME}/.local/libexec/maclife-xfce-mail-helper" uninstall
 fi
+if [ -x "${HOME}/.local/libexec/maclife-plank-thunderbird" ]; then
+    "${HOME}/.local/libexec/maclife-plank-thunderbird" uninstall
+fi
 restore_xsessionrc
 rm -f -- \
     "${HOME}/.local/bin/maclife" \
@@ -81,6 +84,7 @@ rm -f -- \
     "${HOME}/.local/libexec/maclife-brave-origin" \
     "${HOME}/.local/libexec/maclife-thunderbird" \
     "${HOME}/.local/libexec/maclife-xfce-mail-helper" \
+    "${HOME}/.local/libexec/maclife-plank-thunderbird" \
     "${HOME}/.local/libexec/maclife-launcher-refresh" \
     "${HOME}/.local/libexec/maclife-session-commands/thunderbird" \
     "${HOME}/.config/systemd/user/maclife.service" \
