@@ -11,6 +11,7 @@ const REGISTRY_DESTINATION: &str = "org.a11y.atspi.Registry";
 const REGISTRY_ROOT: &str = "/org/a11y/atspi/accessible/root";
 const ACCESSIBLE_INTERFACE: &str = "org.a11y.atspi.Accessible";
 const COMPONENT_INTERFACE: &str = "org.a11y.atspi.Component";
+const ACTION_INTERFACE: &str = "org.a11y.atspi.Action";
 const SCREEN_COORDINATES: u32 = 0;
 const SELECTED_STATE_BIT: u32 = 1 << 23;
 const DISCOVERY_NODE_LIMIT: usize = 192;
@@ -154,6 +155,14 @@ const ADAPTERS: &[DocumentLifecycleAdapter] = &[
 
 pub fn adapter_for(identity: &str) -> Option<&'static DocumentLifecycleAdapter> {
     ADAPTERS.iter().find(|adapter| adapter.identity == identity)
+}
+
+pub fn is_thunderbird_compose_window(inspection: &Inspection) -> bool {
+    inspection.app_identity == "thunderbird-default"
+        && inspection.focused_window.wm_class.as_ref().is_some_and(|class| {
+            class.instance.eq_ignore_ascii_case("Msgcompose")
+                && class.class.eq_ignore_ascii_case("thunderbird-default")
+        })
 }
 
 pub fn launch_opt_in_status(inspection: &Inspection) -> &'static str {
@@ -366,6 +375,92 @@ impl AtspiDocumentProvider {
             width: width as u16,
             height: height as u16,
         })
+    }
+
+    fn action_name(&self, destination: &str, path: &str, index: i32) -> Result<String, String> {
+        self.proxy(destination, path, ACTION_INTERFACE)?
+            .call("GetName", &(index,))
+            .map_err(|error| error.to_string())
+    }
+
+    fn action_count(&self, destination: &str, path: &str) -> Result<i32, String> {
+        self.proxy(destination, path, ACTION_INTERFACE)?
+            .get_property("NActions")
+            .map_err(|error| error.to_string())
+    }
+
+    fn action_binding(&self, destination: &str, path: &str, index: i32) -> Result<String, String> {
+        self.proxy(destination, path, ACTION_INTERFACE)?
+            .call("GetKeyBinding", &(index,))
+            .map_err(|error| error.to_string())
+    }
+
+    fn do_action(&self, destination: &str, path: &str, index: i32) -> Result<(), String> {
+        let performed: bool = self
+            .proxy(destination, path, ACTION_INTERFACE)?
+            .call("DoAction", &(index,))
+            .map_err(|error| error.to_string())?;
+        if performed {
+            Ok(())
+        } else {
+            Err(format!(
+                "AT-SPI action {index} was refused by {destination}{path}"
+            ))
+        }
+    }
+
+    fn named_descendants(
+        &self,
+        destination: &str,
+        root_path: &str,
+        wanted_role: &str,
+        wanted_name: &str,
+    ) -> Result<Vec<AccessibleRef>, String> {
+        let mut pending = VecDeque::from([(destination.to_string(), root_path.to_string(), 0)]);
+        let mut visited = 0_usize;
+        let mut matches = Vec::new();
+        while let Some((node_destination, node_path, depth)) = pending.pop_front() {
+            visited += 1;
+            if visited > DISCOVERY_NODE_LIMIT {
+                return Err("bounded AT-SPI action discovery exceeded its node limit".into());
+            }
+            let Some(role) = self.discovery_role(&node_destination, &node_path)? else {
+                continue;
+            };
+            let name = self.name(&node_destination, &node_path)?;
+            if role == wanted_role && name == wanted_name {
+                matches.push((node_destination.clone(), node_path.clone().try_into().map_err(
+                    |error: zbus::zvariant::Error| error.to_string(),
+                )?));
+            }
+            if depth >= DISCOVERY_DEPTH_LIMIT || !is_action_discovery_container(&role) {
+                continue;
+            }
+            for (child_destination, child_path) in
+                self.children(&node_destination, &node_path)?
+            {
+                pending.push_back((child_destination, child_path.to_string(), depth + 1));
+            }
+        }
+        Ok(matches)
+    }
+
+    fn unique_named_descendant(
+        &self,
+        destination: &str,
+        root_path: &str,
+        role: &str,
+        name: &str,
+    ) -> Result<AccessibleRef, String> {
+        let matches = self.named_descendants(destination, root_path, role, name)?;
+        match matches.as_slice() {
+            [single] => Ok(single.clone()),
+            [] => Err(format!("AT-SPI {role} {name:?} is unavailable")),
+            _ => Err(format!(
+                "AT-SPI {role} {name:?} is ambiguous: {} matches",
+                matches.len()
+            )),
+        }
     }
 
     fn application_roots(&self, application_name: &str) -> Result<Vec<AccessibleRef>, String> {
@@ -616,6 +711,44 @@ impl AtspiDocumentProvider {
         cached.selected_path = selected_path;
         Ok((cached, state))
     }
+
+    pub fn quit_thunderbird(&self, main_window: &WindowFacts) -> Result<(), String> {
+        let candidates = self.frame_candidates("Thunderbird")?;
+        let frame = select_frame(main_window, &candidates)?;
+        let (file_destination, file_path) =
+            self.unique_named_descendant(&frame.destination, &frame.path, "menu", "File")?;
+        let file_path = file_path.to_string();
+        if self.action_count(&file_destination, &file_path)? != 1
+            || self.action_name(&file_destination, &file_path, 0)? != "click"
+        {
+            return Err("Thunderbird File menu does not expose one click action".into());
+        }
+        self.do_action(&file_destination, &file_path, 0)?;
+
+        let mut last_error = "Thunderbird Quit action did not appear".to_string();
+        for _ in 0..20 {
+            match self.unique_named_descendant(&file_destination, &file_path, "menu item", "Quit") {
+                Ok((quit_destination, quit_path)) => {
+                    let quit_path = quit_path.to_string();
+                    if self.action_count(&quit_destination, &quit_path)? != 1
+                        || self.action_name(&quit_destination, &quit_path, 0)? != "click"
+                        || !self
+                            .action_binding(&quit_destination, &quit_path, 0)?
+                            .contains("<Control>Q")
+                    {
+                        return Err(
+                            "Thunderbird Quit menu item does not expose the audited native action"
+                                .into(),
+                        );
+                    }
+                    return self.do_action(&quit_destination, &quit_path, 0);
+                }
+                Err(error) => last_error = error,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        Err(last_error)
+    }
 }
 
 impl InternalDocumentProvider for AtspiDocumentProvider {
@@ -691,6 +824,10 @@ fn is_discovery_container(role: &str) -> bool {
     )
 }
 
+fn is_action_discovery_container(role: &str) -> bool {
+    is_discovery_container(role) || role == "menu"
+}
+
 fn is_thunderbird_mail_marker(role: &str, name: &str) -> bool {
     (role == "menu" && name == "Message")
         || (role == "button" && matches!(name, "New Message" | "Get Messages"))
@@ -746,9 +883,10 @@ fn select_frame(
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_for, close_decision, is_skippable_discovery_error, launch_opt_in_status,
-        select_frame, CachedFrame, DocumentCloseDecision, InternalDocumentState, ProviderCache,
-        WindowGeometry, UNKNOWN_METHOD_ERROR,
+        adapter_for, close_decision, is_action_discovery_container, is_discovery_container,
+        is_skippable_discovery_error, launch_opt_in_status, select_frame, CachedFrame,
+        DocumentCloseDecision, InternalDocumentState, ProviderCache, WindowGeometry,
+        UNKNOWN_METHOD_ERROR,
     };
     use crate::model::{Inspection, ProcessInfo, WindowFacts};
 
@@ -759,6 +897,13 @@ mod tests {
             minimum_persistent: 1,
             association_proof: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn action_lookup_enters_open_menus_without_changing_tab_discovery() {
+        assert!(!is_discovery_container("menu"));
+        assert!(is_action_discovery_container("menu"));
+        assert!(!is_action_discovery_container("menu item"));
     }
 
     #[test]

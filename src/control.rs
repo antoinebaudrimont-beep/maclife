@@ -1,4 +1,6 @@
 use crate::DynError;
+use std::thread;
+use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, PropMode, Window,
@@ -114,6 +116,19 @@ pub fn activate_window(window: Window) -> Result<(), DynError> {
     Ok(())
 }
 
+pub fn activate_window_and_wait(window: Window) -> Result<(), DynError> {
+    activate_window(window)?;
+    let (conn, root) = connect_root()?;
+    let active_atom = atom(&conn, "_NET_ACTIVE_WINDOW", true)?;
+    for _ in 0..20 {
+        if active_window(&conn, root, active_atom)? == window {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!("window 0x{window:08x} did not become active").into())
+}
+
 pub fn clear_hidden_marker(window: Window) -> Result<(), DynError> {
     let (conn, _) = connect_root()?;
     let marker = atom(&conn, "_MACLIFE_HIDDEN", true)?;
@@ -158,7 +173,7 @@ fn keycode_for_keysym(conn: &RustConnection, keysym: u32) -> Result<u8, DynError
         .ok_or_else(|| format!("X11 keyboard mapping has no keysym 0x{keysym:x}").into())
 }
 
-fn send_shortcut(window: Window, shift: bool) -> Result<(), DynError> {
+fn send_shortcut(window: Window, keysym: u32, shift: bool) -> Result<(), DynError> {
     let (conn, root) = connect_root()?;
     let active_atom = atom(&conn, "_NET_ACTIVE_WINDOW", true)?;
     let active = active_window(&conn, root, active_atom)?;
@@ -171,16 +186,16 @@ fn send_shortcut(window: Window, shift: bool) -> Result<(), DynError> {
 
     let control = keycode_for_keysym(&conn, XK_CONTROL_L)?;
     let shift_key = shift.then(|| keycode_for_keysym(&conn, XK_SHIFT_L)).transpose()?;
-    let w = keycode_for_keysym(&conn, XK_W)?;
+    let key = keycode_for_keysym(&conn, keysym)?;
     conn.xtest_fake_input(KEY_PRESS_EVENT, control, CURRENT_TIME, root, 0, 0, 0)?
         .check()?;
     if let Some(shift_key) = shift_key {
         conn.xtest_fake_input(KEY_PRESS_EVENT, shift_key, CURRENT_TIME, root, 0, 0, 0)?
             .check()?;
     }
-    conn.xtest_fake_input(KEY_PRESS_EVENT, w, CURRENT_TIME, root, 0, 0, 0)?
+    conn.xtest_fake_input(KEY_PRESS_EVENT, key, CURRENT_TIME, root, 0, 0, 0)?
         .check()?;
-    conn.xtest_fake_input(KEY_RELEASE_EVENT, w, CURRENT_TIME, root, 0, 0, 0)?
+    conn.xtest_fake_input(KEY_RELEASE_EVENT, key, CURRENT_TIME, root, 0, 0, 0)?
         .check()?;
     if let Some(shift_key) = shift_key {
         conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_key, CURRENT_TIME, root, 0, 0, 0)?
@@ -193,9 +208,9 @@ fn send_shortcut(window: Window, shift: bool) -> Result<(), DynError> {
 }
 
 pub fn close_active_document(window: Window) -> Result<(), DynError> {
-    send_shortcut(window, false)
+    send_shortcut(window, XK_W, false)
 }
 
 pub fn close_brave_top_level(window: Window) -> Result<(), DynError> {
-    send_shortcut(window, true)
+    send_shortcut(window, XK_W, true)
 }

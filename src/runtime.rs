@@ -81,6 +81,25 @@ fn action_name(decision: &CloseDecision) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseRoute {
+    ThunderbirdCompose,
+    InternalDocuments,
+    ApplicationWindows,
+}
+
+fn close_route(inspection: &Inspection, focus: FocusKind) -> CloseRoute {
+    if focus == FocusKind::Meaningful && documents::is_thunderbird_compose_window(inspection) {
+        CloseRoute::ThunderbirdCompose
+    } else if focus == FocusKind::Meaningful
+        && documents::adapter_for(&inspection.app_identity).is_some()
+    {
+        CloseRoute::InternalDocuments
+    } else {
+        CloseRoute::ApplicationWindows
+    }
+}
+
 fn is_actually_hidden(window: &WindowFacts) -> bool {
     !window.mapped
         || window
@@ -279,9 +298,23 @@ fn handle_close_inspection(
     reconcile_hidden(hidden, &snapshot);
     document_provider.retain_windows(&snapshot.windows);
     let focus = focus_kind(&inspection);
-    if documents::adapter_for(&inspection.app_identity).is_some()
-        && focus == FocusKind::Meaningful
-    {
+    let route = close_route(&inspection, focus);
+    if route == CloseRoute::ThunderbirdCompose {
+        println!(
+            "{} target={} policy=thunderbird-compose action=native-wm-delete xid=0x{:08x}",
+            source, inspection.app_identity, inspection.focused_xid
+        );
+        if options.verbose {
+            print!("{}", report::render(&inspection, true));
+        }
+        if options.dry_run {
+            return Ok(());
+        }
+        control::request_close(inspection.focused_xid)?;
+        document_provider.invalidate(inspection.focused_xid);
+        return Ok(());
+    }
+    if route == CloseRoute::InternalDocuments {
         let state = document_provider.inspect(&inspection);
         let decision = documents::close_decision(&state);
         let action = match &decision {
@@ -562,13 +595,42 @@ fn compatibility_quit_target(
         current_pid,
     )?;
 
+    compatibility_quit_target_from_inspection(adapter, &current, &snapshot.windows)
+        .map_err(Into::into)
+}
+
+fn compatibility_quit_target_from_inspection(
+    adapter: &CompatibilityAdapter,
+    inspection: &Inspection,
+    snapshot_windows: &[WindowFacts],
+) -> Result<u32, String> {
     let windows = match adapter.quit {
-        CompatibilityQuit::CloseSingleLogicalWindow => current.meaningful_windows,
+        CompatibilityQuit::ThunderbirdMenuQuit => {
+            let main_windows: Vec<_> = inspection
+                .meaningful_windows
+                .iter()
+                .filter(|window| {
+                    window.wm_class.as_ref().is_some_and(|class| {
+                        class.instance.eq_ignore_ascii_case("Mail")
+                            && class.class.eq_ignore_ascii_case("thunderbird-default")
+                    })
+                })
+                .collect();
+            return match main_windows.as_slice() {
+                [main] => Ok(main.xid),
+                [] => Err("Thunderbird application Quit requires one main Mail window".into()),
+                _ => Err(format!(
+                    "Thunderbird application Quit found {} main Mail windows",
+                    main_windows.len()
+                )),
+            };
+        }
+        CompatibilityQuit::CloseSingleLogicalWindow => inspection.meaningful_windows.clone(),
         CompatibilityQuit::CloseSingleFamilyWindow => {
-            compatibility::family_windows(adapter, &snapshot.windows)?
+            compatibility::family_windows(adapter, snapshot_windows)?
         }
     };
-    single_native_quit_target(&windows).map_err(Into::into)
+    single_native_quit_target(&windows)
 }
 
 fn quit_method_name(method: QuitMethod) -> &'static str {
@@ -675,7 +737,11 @@ fn resolve_quit_target(
     }
 }
 
-fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), DynError> {
+fn handle_quit(
+    options: RunOptions,
+    hidden: &mut HiddenWindows,
+    document_provider: &mut AtspiDocumentProvider,
+) -> Result<(), DynError> {
     if hidden.pointer_intent_pending() {
         confirm_current_interaction(hidden, "button", true, options.verbose)?;
     }
@@ -725,13 +791,36 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
             if options.dry_run {
                 return Ok(());
             }
-            control::request_close(target)?;
+            let dispatched_method = match adapter.quit {
+                CompatibilityQuit::ThunderbirdMenuQuit => {
+                    control::activate_window_and_wait(target)?;
+                    let main_window = inspection
+                        .meaningful_windows
+                        .iter()
+                        .find(|window| window.xid == target)
+                        .ok_or("validated Thunderbird Mail window disappeared")?;
+                    if main_window.maclife_hidden {
+                        control::clear_hidden_marker(target)?;
+                        hidden.forget(target);
+                    }
+                    document_provider
+                        .quit_thunderbird(main_window)
+                        .map_err(|error| format!("Thunderbird native Quit failed: {error}"))?;
+                    "atspi-file-quit"
+                }
+                CompatibilityQuit::CloseSingleLogicalWindow
+                | CompatibilityQuit::CloseSingleFamilyWindow => {
+                    control::request_close(target)?;
+                    "native-wm-delete"
+                }
+            };
             println!(
-                "Cmd+Q target={} source={} policy={} adapter={} result=dispatched method=native-wm-delete xid=0x{:08x}",
+                "Cmd+Q target={} source={} policy={} adapter={} result=dispatched method={} xid=0x{:08x}",
                 inspection.app_identity,
                 source.name(),
                 policy.kind.name(),
                 adapter.name,
+                dispatched_method,
                 target
             );
             return Ok(());
@@ -883,7 +972,7 @@ fn handle_event(
             let result = if event.detail == options.close_keycode {
                 handle_close(options, hidden, document_provider)
             } else if event.detail == options.quit_keycode {
-                handle_quit(options, hidden)
+                handle_quit(options, hidden, document_provider)
             } else if event.detail == options.close_window_keycode {
                 handle_close_top_level(options, hidden, document_provider)
             } else {
@@ -1174,12 +1263,14 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        inspect_close_target, is_adoptable_hidden, revalidate_process_metadata,
-        select_restore_candidate, single_native_quit_target, top_level_close_target,
+        close_route, compatibility_quit_target_from_inspection, inspect_close_target,
+        is_adoptable_hidden, revalidate_process_metadata, select_restore_candidate,
+        single_native_quit_target, top_level_close_target, CloseRoute,
     };
     use crate::compatibility;
     use crate::identity;
-    use crate::model::{ProcessInfo, Snapshot, WindowFacts};
+    use crate::lifecycle::FocusKind;
+    use crate::model::{ProcessInfo, Snapshot, WindowFacts, WmClass};
 
     fn process_window(xid: u32, class: &str, pid: u32, executable: &str) -> WindowFacts {
         let mut window = WindowFacts::test_window(xid, class);
@@ -1223,6 +1314,78 @@ mod tests {
         dialog.window_types = vec!["_NET_WM_WINDOW_TYPE_DIALOG".to_string()];
         let inspection = identity::inspect(20, vec![main, dialog]).expect("dialog inspection");
         assert_eq!(top_level_close_target(&inspection), Ok(20));
+    }
+
+    #[test]
+    fn thunderbird_compose_closes_natively_without_changing_mail_tab_routing() {
+        let mut mail = WindowFacts::test_window(10, "thunderbird-default");
+        mail.wm_class = Some(WmClass {
+            instance: "Mail".to_string(),
+            class: "thunderbird-default".to_string(),
+        });
+        let mut compose = WindowFacts::test_window(20, "thunderbird-default");
+        compose.wm_class = Some(WmClass {
+            instance: "Msgcompose".to_string(),
+            class: "thunderbird-default".to_string(),
+        });
+
+        let mail_inspection = identity::inspect(10, vec![mail.clone(), compose.clone()])
+            .expect("mail inspection");
+        assert_eq!(
+            close_route(&mail_inspection, FocusKind::Meaningful),
+            CloseRoute::InternalDocuments
+        );
+
+        let compose_inspection =
+            identity::inspect(20, vec![mail, compose]).expect("compose inspection");
+        assert_eq!(
+            close_route(&compose_inspection, FocusKind::Meaningful),
+            CloseRoute::ThunderbirdCompose
+        );
+        assert_eq!(compose_inspection.focused_xid, 20);
+    }
+
+    #[test]
+    fn thunderbird_multi_window_quit_targets_its_single_main_mail_window() {
+        let mut mail = process_window(10, "thunderbird-default", 1234, "thunderbird-bin");
+        mail.wm_class = Some(WmClass {
+            instance: "Mail".to_string(),
+            class: "thunderbird-default".to_string(),
+        });
+        let mut compose =
+            process_window(20, "thunderbird-default", 1234, "thunderbird-bin");
+        compose.wm_class = Some(WmClass {
+            instance: "Msgcompose".to_string(),
+            class: "thunderbird-default".to_string(),
+        });
+        let windows = vec![mail, compose];
+        let inspection = identity::inspect(20, windows.clone()).expect("inspection");
+        let adapter = compatibility::adapter_for("thunderbird-default").expect("adapter");
+
+        assert_eq!(
+            compatibility_quit_target_from_inspection(adapter, &inspection, &windows),
+            Ok(10)
+        );
+
+        let compose_only = identity::inspect(20, vec![windows[1].clone()]).expect("compose");
+        assert!(compatibility_quit_target_from_inspection(
+            adapter,
+            &compose_only,
+            &[windows[1].clone()]
+        )
+        .is_err());
+
+        let mut second_mail = windows[0].clone();
+        second_mail.xid = 30;
+        let ambiguous_windows = vec![windows[0].clone(), windows[1].clone(), second_mail];
+        let ambiguous =
+            identity::inspect(20, ambiguous_windows.clone()).expect("ambiguous main windows");
+        assert!(compatibility_quit_target_from_inspection(
+            adapter,
+            &ambiguous,
+            &ambiguous_windows
+        )
+        .is_err());
     }
 
     #[test]

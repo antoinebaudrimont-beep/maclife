@@ -5,6 +5,7 @@ use crate::model::{Disposition, Inspection, WindowFacts};
 pub enum CompatibilityQuit {
     CloseSingleLogicalWindow,
     CloseSingleFamilyWindow,
+    ThunderbirdMenuQuit,
 }
 
 impl CompatibilityQuit {
@@ -12,6 +13,7 @@ impl CompatibilityQuit {
         match self {
             Self::CloseSingleLogicalWindow => "native-wm-delete-single-logical-window",
             Self::CloseSingleFamilyWindow => "native-wm-delete-single-family-window",
+            Self::ThunderbirdMenuQuit => "atspi-file-quit",
         }
     }
 }
@@ -50,7 +52,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["thunderbird-bin"],
         process_executables: &[],
         family: Some("thunderbird"),
-        quit: CompatibilityQuit::CloseSingleLogicalWindow,
+        quit: CompatibilityQuit::ThunderbirdMenuQuit,
         shared_process: false,
     },
     CompatibilityAdapter {
@@ -325,6 +327,7 @@ mod tests {
     #[test]
     fn thunderbird_accepts_only_its_exact_process_alias() {
         let adapter = adapter_for("thunderbird-default").expect("adapter");
+        assert_eq!(adapter.quit, CompatibilityQuit::ThunderbirdMenuQuit);
         let valid = process_window(10, "thunderbird-default", 100, "thunderbird-bin");
         let inspection = identity::inspect(10, vec![valid]).expect("inspection");
         assert_eq!(validate_inspection(adapter, &inspection), Ok(100));
@@ -457,6 +460,7 @@ mod tests {
                 adapter.quit,
                 CompatibilityQuit::CloseSingleLogicalWindow
                     | CompatibilityQuit::CloseSingleFamilyWindow
+                    | CompatibilityQuit::ThunderbirdMenuQuit
             ));
         }
     }
