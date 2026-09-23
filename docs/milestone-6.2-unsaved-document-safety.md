@@ -125,8 +125,9 @@ window on 2026-09-23. Cmd+Q dispatched `atspi-file-quit` and Thunderbird showed
 its native save prompt. After Cancel, both windows, the draft text, and the
 Thunderbird process remained. No delayed termination fallback ran. Focus moved
 through the Inbox and back to compose before the prompt, a known usability
-rough edge of invoking the main Mail window's menu. A clean-state quit is not
-yet physically recorded.
+rough edge of invoking the main Mail window's menu. After the disposable draft
+was resolved, a second Cmd+Q dispatched the same native action and Thunderbird
+exited normally. MacLife remained running.
 
 ## Dirty FeatherPad physical validation
 

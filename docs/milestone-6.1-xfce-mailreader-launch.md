@@ -91,7 +91,9 @@ Cancel retained Inbox, compose, draft text, and the Thunderbird process. The
 daemon logged `result=dispatched method=atspi-file-quit`, with no subsequent
 termination fallback. Focus visibly moved from compose to Inbox and back to
 compose before the prompt appeared. This is awkward but did not bypass veto;
-it remains a usability limitation. A separate clean-state quit is still pending.
+it remains a usability limitation. After resolving the disposable draft, a
+second Cmd+Q with the clean Inbox open dispatched the same native action and
+Thunderbird exited; the MacLife daemon remained running.
 
 ## Boundary
 
