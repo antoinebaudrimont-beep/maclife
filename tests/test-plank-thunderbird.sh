@@ -35,7 +35,24 @@ setup_case custom
 printf '[PlankDockItemPreferences]\nLauncher=file:///other/thunderbird.desktop\n' >"$dockitem"
 run_helper install "$wrapper"
 grep -qxF 'Launcher=file:///other/thunderbird.desktop' "$dockitem"
-test ! -e "$data_root/maclife/plank-launcher-backups/thunderbird.dockitem.original"
+test ! -e "$data_root/maclife/plank-launcher-backups/v2/pin.original"
+
+setup_case numbered
+dockitem=$config_root/plank/dock1/launchers/thunderbird-1.dockitem
+printf '[PlankDockItemPreferences]\nLauncher=file:///usr/share/applications/thunderbird.desktop\n' >"$dockitem"
+run_helper install "$wrapper"
+grep -qxF "Launcher=file://$desktop" "$dockitem"
+grep -qxF 'thunderbird-1.dockitem' "$data_root/maclife/plank-launcher-backups/v2/pin-name"
+run_helper uninstall
+grep -qxF 'Launcher=file:///usr/share/applications/thunderbird.desktop' "$dockitem"
+
+setup_case ambiguous
+printf '[PlankDockItemPreferences]\nLauncher=file:///usr/share/applications/thunderbird.desktop\n' >"$dockitem"
+cp -p -- "$dockitem" "$config_root/plank/dock1/launchers/thunderbird-1.dockitem"
+if run_helper install "$wrapper"; then
+    printf '%s\n' 'Expected ambiguous Plank pins to refuse.' >&2
+    exit 1
+fi
 
 setup_case edited
 printf '[PlankDockItemPreferences]\nLauncher=file:///usr/share/applications/thunderbird.desktop\n' >"$dockitem"

@@ -162,7 +162,6 @@ install_launcher_override \
     thunderbird.desktop \
     "$helper_dir/maclife-thunderbird"
 "$helper_dir/maclife-xfce-mail-helper" install "$helper_dir/maclife-thunderbird"
-"$helper_dir/maclife-plank-thunderbird" install "$helper_dir/maclife-thunderbird"
 install_xsession_command_path
 "$helper_dir/maclife-launcher-refresh"
 if command -v update-desktop-database >/dev/null 2>&1; then

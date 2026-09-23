@@ -65,6 +65,9 @@ restore_xsessionrc() {
     fi
 }
 
+if [ -x "${HOME}/.local/libexec/maclife-plank-thunderbird" ]; then
+    "${HOME}/.local/libexec/maclife-plank-thunderbird" uninstall
+fi
 systemctl --user stop maclife.service >/dev/null 2>&1 || true
 systemctl --user disable --now maclife-launcher-refresh.path >/dev/null 2>&1 || true
 if [ -x "${HOME}/.local/libexec/maclife-launcher-refresh" ]; then
@@ -72,9 +75,6 @@ if [ -x "${HOME}/.local/libexec/maclife-launcher-refresh" ]; then
 fi
 if [ -x "${HOME}/.local/libexec/maclife-xfce-mail-helper" ]; then
     "${HOME}/.local/libexec/maclife-xfce-mail-helper" uninstall
-fi
-if [ -x "${HOME}/.local/libexec/maclife-plank-thunderbird" ]; then
-    "${HOME}/.local/libexec/maclife-plank-thunderbird" uninstall
 fi
 restore_xsessionrc
 rm -f -- \
