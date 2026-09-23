@@ -2,7 +2,7 @@
 
 MacLife is an experimental macOS-style application lifecycle project for MX Linux/XFCE on X11.
 
-This repository contains **Milestone 6.1**: a reliable XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, and Thunderbird. MacLife installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
+This repository contains the completed **Milestone 7.2A** server-side title-bar hook plus the **Milestone 6.2 unsaved-document safety correction**. MacLife is a reliable XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, and Thunderbird. It installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
 
 ## Install for the current user
 
@@ -88,10 +88,10 @@ Normal service logs contain startup, shutdown, lifecycle actions, refusals, and 
 
 | Policy class | Command+W with 2+ meaningful windows | Command+W on final window | Command+Q |
 |---|---|---|---|
-| Supported internal-document application | Close the active native tab/document when its per-window count exceeds the persistent minimum | Iconify and mark the top-level window | Existing validated application quit adapter |
-| Ordinary generic application | Close focused window with `WM_DELETE_WINDOW` | Iconify and mark for restore | Revalidated same-user SIGTERM only when one safe application PID is established |
-| Dedicated quit adapter | Close focused window | Iconify and mark | Application API first; narrowly scoped fallback where documented |
-| Native lifecycle application | Close focused window | Native close | Proven application-level process action |
+| Supported internal-document application | Close the active native tab/document when its per-window count exceeds the persistent minimum | Iconify and mark the top-level window | Audited graceful adapter, one exact native window close, or refuse |
+| Ordinary generic application | Close focused window with `WM_DELETE_WINDOW` | Iconify and mark for restore | One window: exact `WM_DELETE_WINDOW`; multiple windows: refuse |
+| Dedicated quit adapter | Close focused window | Iconify and mark | Audited application API without process-termination fallback |
+| Native lifecycle application | Close focused window | Native close | One exact veto-capable native window close or refuse |
 | Terminal/safety-sensitive application | Close focused window | Native close | `WM_DELETE_WINDOW` for the exact client-leader group, preserving terminal confirmations |
 | Excluded desktop/internal client | Refuse | Refuse | Refuse |
 | Ambiguous identity/process association | Refuse when window identity is unsafe | Refuse | Refuse rather than guess |
@@ -117,17 +117,17 @@ MacLife performs bounded discovery only on a lifecycle command, then caches the 
 
 Narrow exceptions remain because their implementation is safer than the generic mechanism:
 
-- Strawberry uses MPRIS Quit, followed only when necessary by its freshly revalidated exact-PID SIGTERM fallback.
+- Strawberry uses MPRIS Quit with no process-termination fallback.
 - Thunar uses `thunar --quit`.
 - XFCE Terminal retains native last-window close and confirmation-respecting `WM_DELETE_WINDOW`; distinct nonzero `WM_CLIENT_LEADER` values remain hard boundaries.
-- ChatGPT retains native last-window close because its own Electron/tray lifecycle already separates window close from application quit.
-- Brave Browser and Brave Origin retain the previously verified top-level browser-PID association. MacLife never kills renderer/helper trees.
+- ChatGPT retains native last-window close because its own Electron/tray lifecycle already separates window close from application quit; Command+Q requests one native window close rather than signaling its process.
+- Brave Browser and Brave Origin retain strict variant validation, but Command+Q no longer signals their browser processes. One validated logical window receives `WM_DELETE_WINDOW`; multiple windows refuse.
 
 With more than one meaningful application window, Command+W requests a normal close of the focused window. A focused attached dialog is closed normally and never causes its owner to be hidden. Restore works for generic identities, acts only on a meaningful window bearing MacLife's private hidden marker, and refuses ambiguous matches.
 
 ### Generic quit safety
 
-X11 has no universal application-level Quit protocol. For an ordinary generic application, MacLife requires a local same-user validated `_NET_WM_PID`, an exact match between normalized window and executable identity, and the same validated PID on every meaningful grouped window. Helper-like command lines and conflicting window PIDs are rejected. Immediately before SIGTERM, MacLife recollects the X11 window, PID, UID, parent PID, process name, executable, and command line and refuses if any association changed. It never sends SIGKILL and never recursively terminates a process tree.
+X11 has no universal application-level Quit protocol, and a correct PID association is not permission to terminate an interactive application. MacLife never uses SIGTERM, SIGKILL, `XKillClient`, or direct X11 destruction as an application lifecycle action. A generic application with exactly one meaningful top-level window receives `WM_PROTOCOLS / WM_DELETE_WINDOW` on that exact XID, preserving native Save / Discard / Cancel handling and the application's right to veto. A generic application with multiple meaningful windows refuses Command+Q unless an audited application-level graceful adapter exists. There is no delayed process-termination fallback after a native close request.
 
 ### Compatibility adapters
 
@@ -137,13 +137,14 @@ Current compatibility behavior:
 
 | Adapter | Window identity | Required process identity | Command+Q method |
 |---|---|---|---|
-| Thunderbird | `thunderbird-default` | `thunderbird-bin` | Native close request for validated Thunderbird windows |
-| GIMP 3 | `gimp` | `gimp-3-0` | Native close request for validated GIMP windows |
-| LibreOffice | module identities such as `libreoffice-writer` and `libreoffice-calc` | `soffice-bin` | Native close requests for every validated LibreOffice family window |
-| Spotify Brave web app | `spotifyweb` | `brave-browser` | Native close request for Spotify windows only; never signal Brave |
-| Brave-generated PWA | `brave-origin-crx-*` or `brave-browser-crx-*` | `brave-browser` plus the exact matching Origin/Browser executable | Native close requests for that logical PWA only; never signal Brave |
+| Thunderbird | `thunderbird-default` | `thunderbird-bin` | One validated logical window: native close; multiple: refuse |
+| GIMP 3 | `gimp` | `gimp-3-0` | One validated logical window: native close; multiple: refuse |
+| LibreOffice | module identities such as `libreoffice-writer` and `libreoffice-calc` | `soffice-bin` | One validated family window: native close; multiple: refuse |
+| Brave Origin / Browser | exact variant identity | `brave-browser` plus exact variant executable | One validated logical window: native close; multiple: refuse |
+| Spotify Brave web app | `spotifyweb` | `brave-browser` | One Spotify window: native close; multiple: refuse; never signal Brave |
+| Brave-generated PWA | `brave-origin-crx-*` or `brave-browser-crx-*` | `brave-browser` plus the exact matching Origin/Browser executable | One logical PWA window: native close; multiple: refuse; never signal Brave |
 
-Native window close is intentional. It preserves application save/confirmation behavior and is safer than SIGTERM for these applications. LibreOffice Writer and Calc remain distinct window identities for reporting and focused Command+W, but their shared `WM_CLIENT_LEADER`, PID, and suite lifecycle make Command+Q a whole-LibreOffice-family action. Spotify and generic Brave PWA adapters are safe even if a browser process is shared: they never send a process signal and never select an unrelated Brave window. Generic PWA matching retains the concrete Browser/Origin class prefix and requires that variant's exact executable path.
+Native window close is intentional. It preserves application save/confirmation behavior and application veto authority. LibreOffice Writer and Calc remain distinct identities for reporting and focused Command+W; family matching prevents unrelated selection, while multiple family windows now refuse rather than receiving simultaneous close requests. Spotify and generic Brave PWA adapters remain safe even if a browser process is shared: they never send a process signal and never select an unrelated Brave window. Generic PWA matching retains the concrete Browser/Origin class prefix and requires that variant's exact executable path.
 
 Adapter precedence is deterministic:
 
@@ -151,11 +152,11 @@ Adapter precedence is deterministic:
 2. Existing dedicated/native/safety policies (Strawberry, Thunar, ChatGPT, terminal) take precedence.
 3. A matching compatibility adapter must validate all of its evidence.
 4. Applications without adapters use the generic validator.
-5. Any failed or ambiguous resolution refuses; adapter failure never falls through to generic SIGTERM.
+5. Any failed, ambiguous, or multi-window resolution without an audited graceful application-level method refuses; no adapter falls through to process termination.
 
 `maclife inspect --verbose` reports the selected adapter, application family, accepted process identities, resolution evidence, quit method, and whether the process may be shared.
 
-After MacLife hides a final window, xfwm4 may automatically focus another application. A focus change alone does not replace the logical hidden target, so an immediate Command+Q still applies to the application the user just hid. MacLife replaces that target only after confirmed user keyboard or button interaction with another meaningful application. Restore, destruction, marker loss, failed identity/PID validation, and successful quit also clear it. Command+W never uses the logical fallback.
+After MacLife hides a final window, xfwm4 may automatically focus another application. A focus change alone does not replace the logical hidden target, so an immediate Command+Q still applies to the application the user just hid. MacLife replaces that target only after confirmed user keyboard or button interaction with another meaningful application. Restore, observed window destruction, marker loss, and failed identity validation also clear it. Merely dispatching a veto-capable close request does not. Command+W never uses the logical fallback.
 
 User intent is observed through XInput2 raw events. Keyboard events are accepted only from enabled `XWayKeyz (virtual) Keyboard` slave devices discovered dynamically by name. The physical Toshy trace showed keycode 105 (`Control_R`) framing the dedicated F13/F14 event. A small event-order state machine defers that exact precursor and ignores its lifecycle suffix; it does not use a timeout and does not broadly ignore modifiers. F13/F14 and their observed wrapper events therefore preserve the hidden logical target, while any ordinary key immediately confirms the currently focused application. Button events are accepted from enabled non-XTEST, non-XWayKeyz slave pointers and are resolved after focus settles or before the next lifecycle command. Device hierarchy changes refresh these sets without hard-coded IDs. If intent is ambiguous, MacLife conservatively preserves the hidden logical target.
 
@@ -191,23 +192,23 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 - X11 has no universal application identity. Two unrelated programs can reuse a `WM_CLASS`, and a broken client can publish stale properties.
 - Some applications omit `WM_CLIENT_LEADER`; this is expected for the observed ChatGPT and Brave builds.
 - Chromium/Electron helper PIDs are processes, not windows or application identities. Normal browser windows are grouped by class rather than by renderer ancestry.
-- A generic application whose window identity differs from its executable identity, exposes multiple top-level PIDs, or resembles a helper process can still use Command+W preservation but Command+Q is refused.
+- A generic application with multiple meaningful top-level windows can still use Command+W preservation but Command+Q is refused unless it has an audited veto-capable application-level adapter.
 - A remote X client or a sandbox may expose `_NET_WM_PID` while its `/proc` entry is unavailable. The PID is printed but explicitly remains unvalidated.
 - A dialog that omits `WM_TRANSIENT_FOR` is still attached when it advertises `_NET_WM_WINDOW_TYPE_DIALOG`; ownership then falls back to class/leader evidence.
 - An unusual user-facing utility window is intentionally excluded in Milestone 2. A later configuration layer may need a per-application opt-in.
 - Minimized/hidden normal windows remain meaningful and are counted. Mapping state is reported rather than used as an identity filter.
 - Internal-document support currently covers only Brave Browser, Brave Origin, and Thunderbird. Other tabbed applications retain their ordinary X11 window lifecycle until they have an evidence-backed provider.
-- GIMP multi-window mode has not been physically exercised with multiple edited images. Its adapter is conservative about PID consistency and uses native close requests so GIMP retains confirmation authority.
-- LibreOffice Command+Q intentionally means whole-suite quit: every validated Writer/Calc/other supported module window receives a native close request. If module windows expose different PIDs, the adapter refuses.
+- GIMP multi-window mode refuses Command+Q rather than dispatching parallel native close requests; individual windows retain confirmation authority through Shift+Command+W.
+- LibreOffice Command+Q sends native close only when exactly one validated family window exists. Multiple Writer/Calc/other supported module windows refuse rather than racing document confirmations.
 - The current Spotify launcher uses an isolated Brave user-data directory, but MacLife does not rely on that deployment detail. The adapter remains window-only and cannot terminate unrelated Brave processes.
 - The built-in registry is intentionally small. Unknown mismatches still refuse. Future configuration can reuse the adapter representation, but Milestone 6 exposes no unsafe user-defined PID aliases.
 
 ## Verification status
 
-Automated tests cover generic eligibility, one/two-window policy, transient ownership, marker-only generic restore selection, safe and ambiguous generic process quit, compatibility alias validation, LibreOffice family scoping, shared Brave/PWA safety, process-metadata revalidation, desktop filtering, terminal/native exceptions, all reference applications, logical-active state transitions, XInput device classification, the physical lifecycle-chord state machine, and Strawberry fallback revalidation. They do not pretend to emulate an X server.
+Automated tests cover generic eligibility, one/two-window policy, transient ownership, marker-only generic restore selection, exact-XID native quit, multi-window quit refusal, compatibility adapters with no process-termination variant, LibreOffice family scoping, shared Brave/PWA safety, process-metadata revalidation, desktop filtering, terminal/native exceptions, all reference applications, logical-active state transitions, XInput device classification, and the physical lifecycle-chord state machine. They do not pretend to emulate an X server.
 
 Milestone 2 identity validation is recorded in [docs/live-test-checklist.md](docs/live-test-checklist.md), Milestone 3 input/lifecycle validation in [docs/milestone-3-live-test-checklist.md](docs/milestone-3-live-test-checklist.md), Milestone 4 generic-policy validation in [docs/milestone-4-live-test-checklist.md](docs/milestone-4-live-test-checklist.md), Milestone 5 service validation in [docs/milestone-5-live-test-checklist.md](docs/milestone-5-live-test-checklist.md), Milestone 6 compatibility validation in [docs/milestone-6-live-test-checklist.md](docs/milestone-6-live-test-checklist.md), and Milestone 6.1 internal-document validation in [docs/milestone-6.1-live-test-checklist.md](docs/milestone-6.1-live-test-checklist.md).
 
 ## Milestone boundary
 
-Milestone 6.1 is X11/XFCE-only and intentionally conservative; it does not claim universal Linux application or tab compatibility. It does not implement Command+H or Command+M, title-bar close interception, xfwm4 patches, CDP/debugging ports, screenshot tab detection, restoration across logout/login or a new X server, GUI configuration, unsafe user-defined process aliases, or Wayland support. Same-session daemon restart adoption is deliberately narrower than persistent session restoration.
+MacLife remains X11/XFCE-only and intentionally conservative; it does not claim universal Linux application or tab compatibility. Milestone 7.2A covers only xfwm4 server-side-decorated title-bar buttons. It does not implement Command+H or Command+M, client-side-decorated title-bar interception, CDP/debugging ports, screenshot tab detection, restoration across logout/login or a new X server, GUI configuration, unsafe user-defined process aliases, or Wayland support. Same-session daemon restart adoption is deliberately narrower than persistent session restoration.
