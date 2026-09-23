@@ -6,6 +6,12 @@ helper=$script_dir/../packaging/maclife-plank-thunderbird
 test_root=$(mktemp -d)
 trap 'rm -rf -- "$test_root"' EXIT HUP INT TERM
 wrapper=/home/test/.local/libexec/maclife-thunderbird
+fixture_bin=$test_root/bin
+mkdir -p -- "$fixture_bin"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$PLANK_TEST_DOCK_ITEMS"' >"$fixture_bin/gsettings"
+chmod 0755 "$fixture_bin/gsettings"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$fixture_bin/pgrep"
+chmod 0755 "$fixture_bin/pgrep"
 
 setup_case() {
     case_root=$test_root/$1
@@ -15,10 +21,12 @@ setup_case() {
     desktop=$data_root/applications/thunderbird.desktop
     mkdir -p -- "$(dirname -- "$dockitem")" "$(dirname -- "$desktop")"
     printf '[Desktop Entry]\nExec=%s %%u\n' "$wrapper" >"$desktop"
+    dock_items="['thunderbird.dockitem']"
 }
 
 run_helper() {
-    XDG_CONFIG_HOME="$config_root" XDG_DATA_HOME="$data_root" \
+    PATH="$fixture_bin:$PATH" PLANK_TEST_DOCK_ITEMS="$dock_items" \
+        XDG_CONFIG_HOME="$config_root" XDG_DATA_HOME="$data_root" \
         "$helper" "$@"
 }
 
@@ -35,18 +43,27 @@ setup_case custom
 printf '[PlankDockItemPreferences]\nLauncher=file:///other/thunderbird.desktop\n' >"$dockitem"
 run_helper install "$wrapper"
 grep -qxF 'Launcher=file:///other/thunderbird.desktop' "$dockitem"
-test ! -e "$data_root/maclife/plank-launcher-backups/v2/pin.original"
+test ! -e "$data_root/maclife/plank-launcher-backups/v3/pin.original"
 
 setup_case numbered
 dockitem=$config_root/plank/dock1/launchers/thunderbird-1.dockitem
+dock_items="['thunderbird-1.dockitem']"
 printf '[PlankDockItemPreferences]\nLauncher=file:///usr/share/applications/thunderbird.desktop\n' >"$dockitem"
 run_helper install "$wrapper"
 grep -qxF "Launcher=file://$desktop" "$dockitem"
-grep -qxF 'thunderbird-1.dockitem' "$data_root/maclife/plank-launcher-backups/v2/pin-name"
+grep -qxF 'thunderbird-1.dockitem' "$data_root/maclife/plank-launcher-backups/v3/pin-name"
 run_helper uninstall
 grep -qxF 'Launcher=file:///usr/share/applications/thunderbird.desktop' "$dockitem"
 
+setup_case orphan
+dockitem=$config_root/plank/dock1/launchers/thunderbird-1.dockitem
+printf '[PlankDockItemPreferences]\nLauncher=file:///usr/share/applications/thunderbird.desktop\n' >"$dockitem"
+run_helper install "$wrapper"
+grep -qxF 'Launcher=file:///usr/share/applications/thunderbird.desktop' "$dockitem"
+test ! -e "$data_root/maclife/plank-launcher-backups/v3/pin.original"
+
 setup_case ambiguous
+dock_items="['thunderbird.dockitem', 'thunderbird-1.dockitem']"
 printf '[PlankDockItemPreferences]\nLauncher=file:///usr/share/applications/thunderbird.desktop\n' >"$dockitem"
 cp -p -- "$dockitem" "$config_root/plank/dock1/launchers/thunderbird-1.dockitem"
 if run_helper install "$wrapper"; then

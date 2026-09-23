@@ -10,7 +10,7 @@ config_home=${XDG_CONFIG_HOME:-${HOME}/.config}
 data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
 launchers_dir=$config_home/plank/dock1/launchers
 desktop=$data_home/applications/thunderbird.desktop
-state_dir=$data_home/maclife/plank-launcher-backups/v2
+state_dir=$data_home/maclife/plank-launcher-backups/v3
 original=$state_dir/pin.original
 managed=$state_dir/pin.managed
 pin_name_file=$state_dir/pin-name
@@ -19,7 +19,6 @@ managed_line=Launcher=file://$desktop
 timestamp=$(date +%Y%m%d-%H%M%S)
 
 require_stopped_plank() {
-    [ "$config_home" = "${HOME}/.config" ] || return 0
     command -v pgrep >/dev/null 2>&1 || {
         printf '%s\n' 'Cannot verify whether Plank is running.' >&2
         exit 1
@@ -40,9 +39,20 @@ saved_pin() {
 }
 
 find_unique_pin() {
+    dock_items=$(gsettings get \
+        'net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/' \
+        dock-items) || {
+        printf '%s\n' 'Cannot read Plank dock1 item list.' >&2
+        exit 1
+    }
     count=0
     for candidate in "$launchers_dir"/thunderbird*.dockitem; do
         [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+        candidate_name=${candidate##*/}
+        case "$dock_items" in
+            *"'$candidate_name'"*) ;;
+            *) continue ;;
+        esac
         if grep -qxF "$vendor_line" "$candidate" || \
             grep -qxF "$managed_line" "$candidate"
         then
