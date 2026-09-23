@@ -1,0 +1,159 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    printf '%s\n' "Usage: $0 install /absolute/path/to/maclife-thunderbird | uninstall" >&2
+    exit 2
+}
+
+data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
+config_home=${XDG_CONFIG_HOME:-${HOME}/.config}
+source_file=${MACLIFE_XFCE_MAIL_HELPER_SOURCE:-/usr/share/xfce4/helpers/thunderbird.desktop}
+target_dir=$data_home/xfce4/helpers
+target_file=$target_dir/thunderbird.desktop
+state_dir=$data_home/maclife/xfce-helper-backups
+original_file=$state_dir/thunderbird.desktop.original
+created_file=$state_dir/thunderbird.desktop.created
+managed_file=$state_dir/thunderbird.desktop.managed
+helpers_rc=$config_home/xfce4/helpers.rc
+timestamp=$(date +%Y%m%d-%H%M%S)
+
+selected_as_mail_reader() {
+    [ -r "$helpers_rc" ] && grep -qxF 'MailReader=thunderbird' "$helpers_rc"
+}
+
+validate_source() {
+    [ -r "$source_file" ] || {
+        printf 'Required XFCE Thunderbird helper is unavailable: %s\n' "$source_file" >&2
+        exit 1
+    }
+    grep -qxF 'Type=X-XFCE-Helper' "$source_file" || {
+        printf 'Not an XFCE helper: %s\n' "$source_file" >&2
+        exit 1
+    }
+    grep -qxF 'X-XFCE-Category=MailReader' "$source_file" || {
+        printf 'Not an XFCE MailReader helper: %s\n' "$source_file" >&2
+        exit 1
+    }
+    binary_lines=$(grep -c '^X-XFCE-Binaries=' "$source_file" || true)
+    [ "$binary_lines" -eq 1 ] || {
+        printf 'Expected one X-XFCE-Binaries entry in %s, found %s\n' \
+            "$source_file" "$binary_lines" >&2
+        exit 1
+    }
+    grep -q '^X-XFCE-Commands=.*%B' "$source_file" || {
+        printf 'XFCE helper does not preserve %%B launch behavior: %s\n' "$source_file" >&2
+        exit 1
+    }
+    grep -q '^X-XFCE-CommandsWithParameter=.*%B' "$source_file" || {
+        printf 'XFCE helper does not preserve mailto/compose %%B behavior: %s\n' \
+            "$source_file" >&2
+        exit 1
+    }
+}
+
+record_origin() {
+    if [ -e "$original_file" ] || [ -e "$created_file" ]; then
+        return
+    fi
+    if [ -e "$target_file" ]; then
+        cp -p -- "$target_file" "$original_file"
+        printf 'Recorded pre-existing XFCE mail helper: %s\n' "$target_file"
+    else
+        : >"$created_file"
+    fi
+}
+
+install_helper() {
+    [ "$#" -eq 1 ] || usage
+    wrapper_file=$1
+    case "$wrapper_file" in
+        /*) ;;
+        *) printf 'Thunderbird wrapper path must be absolute: %s\n' "$wrapper_file" >&2; exit 1 ;;
+    esac
+    [ -x "$wrapper_file" ] || {
+        printf 'Thunderbird wrapper is not executable: %s\n' "$wrapper_file" >&2
+        exit 1
+    }
+    if ! selected_as_mail_reader; then
+        printf '%s\n' 'XFCE MailReader is not thunderbird; helper override not installed.'
+        return
+    fi
+
+    validate_source
+    mkdir -p -- "$target_dir" "$state_dir"
+    if [ -e "$managed_file" ] && [ -e "$target_file" ] && \
+        ! cmp -s "$managed_file" "$target_file"
+    then
+        printf 'Refusing to overwrite user-modified XFCE helper: %s\n' "$target_file" >&2
+        exit 1
+    fi
+    if { [ -e "$original_file" ] || [ -e "$created_file" ]; } && \
+        [ ! -e "$managed_file" ]
+    then
+        printf 'Refusing incomplete XFCE helper backup state in %s\n' "$state_dir" >&2
+        exit 1
+    fi
+    record_origin
+
+    generated_file=$target_dir/.thunderbird.desktop.maclife-new-$$
+    trap 'rm -f -- "$generated_file"' EXIT HUP INT TERM
+    awk -v wrapper="$wrapper_file" '
+        /^X-XFCE-Binaries=/ {
+            print "X-XFCE-Binaries=" wrapper ";"
+            replaced++
+            next
+        }
+        { print }
+        END {
+            if (replaced != 1) {
+                exit 42
+            }
+            print "X-MacLife-Managed=true"
+        }
+    ' "$source_file" >"$generated_file"
+    chmod 0644 "$generated_file"
+    mv -f -- "$generated_file" "$target_file"
+    trap - EXIT HUP INT TERM
+    cp -p -- "$target_file" "$managed_file"
+    printf 'Installed managed XFCE MailReader helper: %s\n' "$target_file"
+}
+
+uninstall_helper() {
+    [ "$#" -eq 0 ] || usage
+    if [ ! -e "$original_file" ] && [ ! -e "$created_file" ]; then
+        return
+    fi
+
+    if [ -e "$managed_file" ] && [ -e "$target_file" ] && \
+        ! cmp -s "$managed_file" "$target_file"
+    then
+        if grep -Fq '/.local/libexec/maclife-thunderbird' "$target_file"; then
+            conflict_file=$target_file.maclife-uninstall-conflict-$timestamp
+            cp -p -- "$target_file" "$conflict_file"
+            printf 'Backed up user-modified MacLife helper to %s\n' "$conflict_file" >&2
+        else
+            printf 'Preserving user-modified XFCE helper: %s\n' "$target_file" >&2
+            rm -f -- "$original_file" "$created_file" "$managed_file"
+            return
+        fi
+    fi
+
+    if [ -e "$original_file" ]; then
+        mv -f -- "$original_file" "$target_file"
+        printf 'Restored previous XFCE MailReader helper: %s\n' "$target_file"
+    elif [ -e "$created_file" ]; then
+        rm -f -- "$target_file"
+        printf 'Removed managed XFCE MailReader helper: %s\n' "$target_file"
+    fi
+    rm -f -- "$created_file" "$managed_file"
+}
+
+[ "$#" -ge 1 ] || usage
+mode=$1
+shift
+case "$mode" in
+    install) install_helper "$@" ;;
+    uninstall) uninstall_helper "$@" ;;
+    *) usage ;;
+esac

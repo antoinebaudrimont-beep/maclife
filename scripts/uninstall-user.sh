@@ -70,6 +70,9 @@ systemctl --user disable --now maclife-launcher-refresh.path >/dev/null 2>&1 || 
 if [ -x "${HOME}/.local/libexec/maclife-launcher-refresh" ]; then
     "${HOME}/.local/libexec/maclife-launcher-refresh" --restore-all
 fi
+if [ -x "${HOME}/.local/libexec/maclife-xfce-mail-helper" ]; then
+    "${HOME}/.local/libexec/maclife-xfce-mail-helper" uninstall
+fi
 restore_xsessionrc
 rm -f -- \
     "${HOME}/.local/bin/maclife" \
@@ -77,6 +80,7 @@ rm -f -- \
     "${HOME}/.local/libexec/maclife-brave-browser" \
     "${HOME}/.local/libexec/maclife-brave-origin" \
     "${HOME}/.local/libexec/maclife-thunderbird" \
+    "${HOME}/.local/libexec/maclife-xfce-mail-helper" \
     "${HOME}/.local/libexec/maclife-launcher-refresh" \
     "${HOME}/.local/libexec/maclife-session-commands/thunderbird" \
     "${HOME}/.config/systemd/user/maclife.service" \
