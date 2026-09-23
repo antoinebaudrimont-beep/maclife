@@ -3,17 +3,15 @@ use crate::model::{Disposition, Inspection, WindowFacts};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompatibilityQuit {
-    CloseLogicalWindows,
-    CloseFamilyWindows,
-    TerminateValidatedProcess,
+    CloseSingleLogicalWindow,
+    CloseSingleFamilyWindow,
 }
 
 impl CompatibilityQuit {
     pub fn name(self) -> &'static str {
         match self {
-            Self::CloseLogicalWindows => "wm-delete-logical-app-windows",
-            Self::CloseFamilyWindows => "wm-delete-application-family-windows",
-            Self::TerminateValidatedProcess => "validated-pid-sigterm",
+            Self::CloseSingleLogicalWindow => "native-wm-delete-single-logical-window",
+            Self::CloseSingleFamilyWindow => "native-wm-delete-single-family-window",
         }
     }
 }
@@ -52,7 +50,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["thunderbird-bin"],
         process_executables: &[],
         family: Some("thunderbird"),
-        quit: CompatibilityQuit::CloseLogicalWindows,
+        quit: CompatibilityQuit::CloseSingleLogicalWindow,
         shared_process: false,
     },
     CompatibilityAdapter {
@@ -62,7 +60,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["gimp-3-0"],
         process_executables: &[],
         family: Some("gimp"),
-        quit: CompatibilityQuit::CloseLogicalWindows,
+        quit: CompatibilityQuit::CloseSingleLogicalWindow,
         shared_process: false,
     },
     CompatibilityAdapter {
@@ -72,7 +70,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["soffice-bin"],
         process_executables: &[],
         family: Some("libreoffice"),
-        quit: CompatibilityQuit::CloseFamilyWindows,
+        quit: CompatibilityQuit::CloseSingleFamilyWindow,
         shared_process: true,
     },
     CompatibilityAdapter {
@@ -82,7 +80,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["brave-browser"],
         process_executables: &["/opt/brave.com/brave-origin/brave"],
         family: Some("brave"),
-        quit: CompatibilityQuit::TerminateValidatedProcess,
+        quit: CompatibilityQuit::CloseSingleLogicalWindow,
         shared_process: false,
     },
     CompatibilityAdapter {
@@ -92,7 +90,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["brave-browser"],
         process_executables: &["/opt/brave.com/brave/brave"],
         family: Some("brave"),
-        quit: CompatibilityQuit::TerminateValidatedProcess,
+        quit: CompatibilityQuit::CloseSingleLogicalWindow,
         shared_process: false,
     },
     CompatibilityAdapter {
@@ -102,7 +100,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["brave-browser"],
         process_executables: &[],
         family: Some("brave-pwa"),
-        quit: CompatibilityQuit::CloseLogicalWindows,
+        quit: CompatibilityQuit::CloseSingleLogicalWindow,
         shared_process: true,
     },
     CompatibilityAdapter {
@@ -112,7 +110,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["brave-browser"],
         process_executables: &["/opt/brave.com/brave-origin/brave"],
         family: Some("brave-pwa"),
-        quit: CompatibilityQuit::CloseLogicalWindows,
+        quit: CompatibilityQuit::CloseSingleLogicalWindow,
         shared_process: true,
     },
     CompatibilityAdapter {
@@ -122,7 +120,7 @@ const ADAPTERS: &[CompatibilityAdapter] = &[
         process_identities: &["brave-browser"],
         process_executables: &["/opt/brave.com/brave/brave"],
         family: Some("brave-pwa"),
-        quit: CompatibilityQuit::CloseLogicalWindows,
+        quit: CompatibilityQuit::CloseSingleLogicalWindow,
         shared_process: true,
     },
 ];
@@ -287,7 +285,7 @@ pub fn resolution_summary(
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_for, family_windows, validate_inspection, CompatibilityQuit,
+        adapter_for, family_windows, validate_inspection, CompatibilityQuit, ADAPTERS,
     };
     use crate::identity;
     use crate::model::{ProcessInfo, WindowFacts, WmClass};
@@ -353,7 +351,7 @@ mod tests {
     #[test]
     fn libreoffice_family_is_explicit_and_never_absorbs_unrelated_windows() {
         let adapter = adapter_for("libreoffice-writer").expect("adapter");
-        assert_eq!(adapter.quit, CompatibilityQuit::CloseFamilyWindows);
+        assert_eq!(adapter.quit, CompatibilityQuit::CloseSingleFamilyWindow);
         let writer = process_window(10, "libreoffice-writer", 300, "soffice.bin");
         let calc = process_window(20, "libreoffice-calc", 300, "soffice.bin");
         let unrelated = process_window(30, "FeatherPad", 400, "featherpad");
@@ -372,7 +370,7 @@ mod tests {
     #[test]
     fn spotify_pwa_can_only_close_its_logical_windows() {
         let adapter = adapter_for("spotifyweb").expect("adapter");
-        assert_eq!(adapter.quit, CompatibilityQuit::CloseLogicalWindows);
+        assert_eq!(adapter.quit, CompatibilityQuit::CloseSingleLogicalWindow);
         assert!(adapter.shared_process);
 
         let spotify = process_window(10, "spotifyweb", 500, "brave-browser");
@@ -406,7 +404,7 @@ mod tests {
             .expect("origin PWA inspection");
         let adapter = adapter_for(&inspection.app_identity).expect("origin PWA adapter");
         assert_eq!(adapter.name, "brave-origin-pwa");
-        assert_eq!(adapter.quit, CompatibilityQuit::CloseLogicalWindows);
+        assert_eq!(adapter.quit, CompatibilityQuit::CloseSingleLogicalWindow);
         assert!(adapter.shared_process);
         assert_eq!(validate_inspection(adapter, &inspection), Ok(500));
         assert_eq!(inspection.meaningful_windows.len(), 1);
@@ -422,8 +420,8 @@ mod tests {
     fn brave_variants_accept_only_their_observed_executable_paths() {
         let origin = adapter_for("brave-origin").expect("origin adapter");
         let browser = adapter_for("brave-browser").expect("browser adapter");
-        assert_eq!(origin.quit, CompatibilityQuit::TerminateValidatedProcess);
-        assert_eq!(browser.quit, CompatibilityQuit::TerminateValidatedProcess);
+        assert_eq!(origin.quit, CompatibilityQuit::CloseSingleLogicalWindow);
+        assert_eq!(browser.quit, CompatibilityQuit::CloseSingleLogicalWindow);
 
         let origin_window = process_window_path(
             10,
@@ -450,6 +448,17 @@ mod tests {
         assert_eq!(validate_inspection(browser, &browser_inspection), Ok(600));
         assert!(validate_inspection(browser, &origin_inspection).is_err());
         assert!(validate_inspection(origin, &browser_inspection).is_err());
+    }
+
+    #[test]
+    fn compatibility_adapters_never_select_process_termination() {
+        for adapter in ADAPTERS {
+            assert!(matches!(
+                adapter.quit,
+                CompatibilityQuit::CloseSingleLogicalWindow
+                    | CompatibilityQuit::CloseSingleFamilyWindow
+            ));
+        }
     }
 
     #[test]

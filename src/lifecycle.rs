@@ -11,8 +11,7 @@ pub enum LastWindowAction {
 pub enum QuitMethod {
     StrawberryMpris,
     ThunarCli,
-    GenericValidatedPidTerm,
-    ValidatedPidTerm,
+    NativeCloseSingleWindow,
     CloseEachWindow,
     Unsupported,
 }
@@ -60,25 +59,22 @@ pub fn application_policy(identity: &str, generic_eligible: bool) -> Application
         "chatgpt" => ApplicationPolicy {
             kind: PolicyKind::NativeLifecycle,
             last_window: LastWindowAction::NativeClose,
-            quit: QuitMethod::ValidatedPidTerm,
+            quit: QuitMethod::NativeCloseSingleWindow,
         },
         "xfce4-terminal" => ApplicationPolicy {
             kind: PolicyKind::TerminalSafety,
             last_window: LastWindowAction::NativeClose,
             quit: QuitMethod::CloseEachWindow,
         },
-        // Chromium exposes its browser process through the top-level window's
-        // validated PID. Keep this proven association as a narrow exception;
-        // never infer it for arbitrary multi-process applications.
         "brave-origin" | "brave-browser" => ApplicationPolicy {
             kind: PolicyKind::Generic,
             last_window: LastWindowAction::Hide,
-            quit: QuitMethod::ValidatedPidTerm,
+            quit: QuitMethod::NativeCloseSingleWindow,
         },
         _ if generic_eligible => ApplicationPolicy {
             kind: PolicyKind::Generic,
             last_window: LastWindowAction::Hide,
-            quit: QuitMethod::GenericValidatedPidTerm,
+            quit: QuitMethod::NativeCloseSingleWindow,
         },
         _ => ApplicationPolicy {
             kind: PolicyKind::Refuse,
@@ -346,7 +342,14 @@ mod tests {
             CloseDecision::HideLast
         );
         assert_eq!(policy.kind, PolicyKind::Generic);
-        assert_eq!(policy.quit, QuitMethod::GenericValidatedPidTerm);
+        assert_eq!(policy.quit, QuitMethod::NativeCloseSingleWindow);
+    }
+
+    #[test]
+    fn generic_cmd_w_and_exact_xid_close_keep_final_window_preservation() {
+        let policy = application_policy("featherpad", true);
+        let decision = close_decision(policy, 1, FocusKind::Meaningful);
+        assert_eq!(decision, CloseDecision::HideLast);
     }
 
     #[test]
@@ -392,7 +395,23 @@ mod tests {
         let chatgpt = application_policy("chatgpt", true);
         assert_eq!(chatgpt.kind, PolicyKind::NativeLifecycle);
         assert_eq!(chatgpt.last_window, LastWindowAction::NativeClose);
-        assert_eq!(chatgpt.quit, QuitMethod::ValidatedPidTerm);
+        assert_eq!(chatgpt.quit, QuitMethod::NativeCloseSingleWindow);
+    }
+
+    #[test]
+    fn audited_graceful_quit_adapters_remain_selected() {
+        assert_eq!(
+            application_policy("strawberry", true).quit,
+            QuitMethod::StrawberryMpris
+        );
+        assert_eq!(
+            application_policy("thunar", true).quit,
+            QuitMethod::ThunarCli
+        );
+        assert_eq!(
+            application_policy("brave-browser", true).quit,
+            QuitMethod::NativeCloseSingleWindow
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::lifecycle::{
 use crate::model::{Disposition, Inspection, Snapshot, WindowFacts};
 use crate::signals::ShutdownSignals;
 use crate::singleton::{AcquireResult, SingletonGuard};
-use crate::{process, report, x11, DynError};
+use crate::{report, x11, DynError};
 use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::process::Command;
@@ -436,6 +436,13 @@ fn hide_and_remember(
     Ok(())
 }
 
+fn top_level_close_target(inspection: &Inspection) -> Result<u32, String> {
+    match focus_kind(inspection) {
+        FocusKind::Excluded => Err("focused window is excluded from lifecycle control".into()),
+        FocusKind::Attached | FocusKind::Meaningful => Ok(inspection.focused_xid),
+    }
+}
+
 fn handle_close_top_level(
     options: RunOptions,
     hidden: &mut HiddenWindows,
@@ -447,24 +454,16 @@ fn handle_close_top_level(
     let (snapshot, inspection) = focused_inspection()?;
     reconcile_hidden(hidden, &snapshot);
     document_provider.retain_windows(&snapshot.windows);
-    let focus = focus_kind(&inspection);
-    if focus == FocusKind::Excluded {
-        return Err("focused window is excluded from lifecycle control".into());
-    }
-    let target = if focus == FocusKind::Attached {
-        inspection.identity_window.xid
-    } else {
-        inspection.focused_xid
-    };
+    let target = top_level_close_target(&inspection)?;
     let method = documents::adapter_for(&inspection.app_identity)
         .map(|adapter| adapter.close_top_level)
         .unwrap_or(CloseTopLevelMethod::WmDelete);
     let method_name = match method {
-        CloseTopLevelMethod::ControlShiftW => "native-ctrl-shift-w",
-        CloseTopLevelMethod::WmDelete => "wm-delete-top-level",
+        CloseTopLevelMethod::ControlShiftW => "application-native-ctrl-shift-w",
+        CloseTopLevelMethod::WmDelete => "native-wm-delete",
     };
     println!(
-        "Shift+Cmd+W focused={} policy=top-level-window action={} xid=0x{:08x}",
+        "Shift+Cmd+W focused={} policy=top-level-window action=request-native-window-close method={} xid=0x{:08x}",
         inspection.app_identity, method_name, target
     );
     if options.verbose {
@@ -473,15 +472,16 @@ fn handle_close_top_level(
     if options.dry_run {
         return Ok(());
     }
-    let result = match method {
+    match method {
         CloseTopLevelMethod::ControlShiftW => control::close_brave_top_level(target),
         CloseTopLevelMethod::WmDelete => control::request_close(target),
-    };
-    if result.is_ok() {
-        document_provider.invalidate(target);
-        hidden.forget(target);
-    }
-    result
+    }?;
+    document_provider.invalidate(target);
+    println!(
+        "Shift+Cmd+W focused={} result=dispatched method={} xid=0x{:08x}",
+        inspection.app_identity, method_name, target
+    );
+    Ok(())
 }
 
 fn command_status(program: &str, arguments: &[&str]) -> Result<(), DynError> {
@@ -490,98 +490,6 @@ fn command_status(program: &str, arguments: &[&str]) -> Result<(), DynError> {
         return Err(format!("{program} exited with status {status}").into());
     }
     Ok(())
-}
-
-fn validated_pid(window: &WindowFacts, expected_identity: &str) -> Result<u32, DynError> {
-    let identity = normalized_app_identity(window);
-    if identity != expected_identity {
-        return Err(format!(
-            "refusing SIGTERM: expected {expected_identity} identity, found {identity}"
-        )
-        .into());
-    }
-    validated_local_pid(window)
-}
-
-fn validated_local_pid(window: &WindowFacts) -> Result<u32, DynError> {
-    if !window.pid_validated {
-        return Err(format!(
-            "refusing SIGTERM: _NET_WM_PID is not validated ({})",
-            window.pid_validation
-        )
-        .into());
-    }
-    let pid = window.pid.ok_or("validated window has no PID")?;
-    let process = window
-        .process
-        .as_ref()
-        .ok_or("validated window has no process metadata")?;
-    if process.pid != pid {
-        return Err("refusing SIGTERM: window and process PIDs differ".into());
-    }
-    if pid == std::process::id() {
-        return Err("refusing to terminate MacLife itself".into());
-    }
-    Ok(pid)
-}
-
-fn generic_process_pid(inspection: &Inspection) -> Result<u32, DynError> {
-    identity::generic_lifecycle_eligibility(inspection)
-        .map_err(|reason| format!("refusing generic quit: {reason}"))?;
-    let expected_identity = &inspection.app_identity;
-    let pid = validated_pid(&inspection.identity_window, expected_identity)?;
-    let process = inspection
-        .identity_window
-        .process
-        .as_ref()
-        .ok_or("refusing generic quit: process metadata is missing")?;
-    let process_identity = identity::normalized_process_identity(process);
-    if process_identity != *expected_identity {
-        return Err(format!(
-            "refusing generic quit: window identity {expected_identity} does not match process identity {process_identity}"
-        )
-        .into());
-    }
-    if process
-        .command_line
-        .as_deref()
-        .is_some_and(|command| command.split_whitespace().any(|part| part.starts_with("--type=")))
-        || process.name.to_ascii_lowercase().contains("helper")
-    {
-        return Err(
-            "refusing generic quit: window PID appears to be a helper process".into(),
-        );
-    }
-
-    for window in &inspection.meaningful_windows {
-        let window_pid = validated_pid(window, expected_identity)?;
-        if window_pid != pid {
-            return Err(format!(
-                "refusing generic quit: meaningful windows expose multiple validated PIDs ({pid} and {window_pid})"
-            )
-            .into());
-        }
-        let window_process = window
-            .process
-            .as_ref()
-            .ok_or("refusing generic quit: meaningful window process metadata is missing")?;
-        if identity::normalized_process_identity(window_process) != *expected_identity {
-            return Err(
-                "refusing generic quit: a meaningful window has ambiguous process identity".into(),
-            );
-        }
-    }
-    Ok(pid)
-}
-
-fn revalidate_same_process(
-    original: &WindowFacts,
-    current: &WindowFacts,
-    expected_identity: &str,
-) -> Result<u32, DynError> {
-    let original_pid = validated_pid(original, expected_identity)?;
-    let current_pid = validated_pid(current, expected_identity)?;
-    revalidate_process_metadata(original, current, original_pid, current_pid)
 }
 
 fn revalidate_process_metadata(
@@ -619,10 +527,23 @@ fn revalidate_process_metadata(
     Ok(original_pid)
 }
 
-fn quit_with_compatibility_adapter(
+fn single_native_quit_target(windows: &[WindowFacts]) -> Result<u32, String> {
+    match windows {
+        [window] => Ok(window.xid),
+        [] => Err(
+            "refused-no-safe-quit: application has no meaningful top-level window".to_string(),
+        ),
+        _ => Err(format!(
+            "refused-no-safe-quit: application has {} meaningful top-level windows and no audited veto-capable application quit adapter",
+            windows.len()
+        )),
+    }
+}
+
+fn compatibility_quit_target(
     adapter: &CompatibilityAdapter,
     original: &Inspection,
-) -> Result<(), DynError> {
+) -> Result<u32, DynError> {
     let original_pid = compatibility::validate_inspection(adapter, original)?;
     let snapshot = x11::collect_snapshot()?;
     let current = identity::inspect(original.identity_window.xid, snapshot.windows.clone())?;
@@ -634,81 +555,33 @@ fn quit_with_compatibility_adapter(
         .into());
     }
     let current_pid = compatibility::validate_inspection(adapter, &current)?;
-    let revalidated_pid = revalidate_process_metadata(
+    revalidate_process_metadata(
         &original.identity_window,
         &current.identity_window,
         original_pid,
         current_pid,
     )?;
 
-    match adapter.quit {
-        CompatibilityQuit::TerminateValidatedProcess => {
-            command_status("/bin/kill", &["-TERM", &revalidated_pid.to_string()])
+    let windows = match adapter.quit {
+        CompatibilityQuit::CloseSingleLogicalWindow => current.meaningful_windows,
+        CompatibilityQuit::CloseSingleFamilyWindow => {
+            compatibility::family_windows(adapter, &snapshot.windows)?
         }
-        CompatibilityQuit::CloseLogicalWindows | CompatibilityQuit::CloseFamilyWindows => {
-            let windows = match adapter.quit {
-                CompatibilityQuit::CloseLogicalWindows => current.meaningful_windows,
-                CompatibilityQuit::CloseFamilyWindows => {
-                    compatibility::family_windows(adapter, &snapshot.windows)?
-                }
-                CompatibilityQuit::TerminateValidatedProcess => unreachable!(),
-            };
-            for window in windows {
-                control::request_close(window.xid)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn terminate_revalidated_pid(
-    inspection: &Inspection,
-    require_generic_association: bool,
-) -> Result<(), DynError> {
-    let initial_pid = if require_generic_association {
-        generic_process_pid(inspection)?
-    } else {
-        validated_pid(&inspection.identity_window, &inspection.app_identity)?
     };
-
-    let snapshot = x11::collect_snapshot()?;
-    let current = identity::inspect(inspection.identity_window.xid, snapshot.windows)?;
-    if current.app_identity != inspection.app_identity {
-        return Err(format!(
-            "refusing SIGTERM: application identity changed from {} to {}",
-            inspection.app_identity, current.app_identity
-        )
-        .into());
-    }
-    let revalidated_pid = revalidate_same_process(
-        &inspection.identity_window,
-        &current.identity_window,
-        &inspection.app_identity,
-    )?;
-    if revalidated_pid != initial_pid {
-        return Err("refusing SIGTERM: process association changed during validation".into());
-    }
-    if require_generic_association && generic_process_pid(&current)? != initial_pid {
-        return Err("refusing generic quit: application process association changed".into());
-    }
-
-    command_status("/bin/kill", &["-TERM", &initial_pid.to_string()])
+    single_native_quit_target(&windows).map_err(Into::into)
 }
 
 fn quit_method_name(method: QuitMethod) -> &'static str {
     match method {
-        QuitMethod::StrawberryMpris => "mpris-then-validated-pid-sigterm",
-        QuitMethod::ThunarCli => "thunar--quit",
-        QuitMethod::GenericValidatedPidTerm => "validated-generic-pid-sigterm",
-        QuitMethod::ValidatedPidTerm => "validated-pid-sigterm",
-        QuitMethod::CloseEachWindow => "wm-delete-each-window",
+        QuitMethod::StrawberryMpris => "application-adapter/mpris-quit",
+        QuitMethod::ThunarCli => "application-adapter/thunar--quit",
+        QuitMethod::NativeCloseSingleWindow => "native-wm-delete",
+        QuitMethod::CloseEachWindow => "native-wm-delete-each-window",
         QuitMethod::Unsupported => "unsupported",
     }
 }
 
-fn quit_strawberry(inspection: &Inspection) -> Result<(), DynError> {
-    let original = &inspection.identity_window;
-    let pid = validated_pid(original, "strawberry")?;
+fn quit_strawberry() -> Result<(), DynError> {
     command_status(
         "gdbus",
         &[
@@ -721,27 +594,7 @@ fn quit_strawberry(inspection: &Inspection) -> Result<(), DynError> {
             "--method",
             "org.mpris.MediaPlayer2.Quit",
         ],
-    )?;
-    thread::sleep(Duration::from_millis(750));
-    if process::read_process(pid).is_none() {
-        return Ok(());
-    }
-
-    let snapshot = x11::collect_snapshot()?;
-    let current = snapshot
-        .windows
-        .iter()
-        .find(|window| window.xid == original.xid)
-        .ok_or_else(|| {
-            format!(
-                "Strawberry PID {pid} remained after MPRIS Quit, but its original window disappeared; refusing SIGTERM fallback"
-            )
-        })?;
-    let revalidated_pid = revalidate_same_process(original, current, "strawberry")?;
-    eprintln!(
-        "MacLife: Strawberry MPRIS Quit returned but PID {revalidated_pid} remained; using revalidated SIGTERM fallback"
-    );
-    command_status("/bin/kill", &["-TERM", &revalidated_pid.to_string()])
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -843,24 +696,28 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
     }
     if policy.kind == PolicyKind::Generic {
         if let Some(adapter) = compatibility::adapter_for(&inspection.app_identity) {
-            if let Err(reason) = compatibility::validate_inspection(adapter, &inspection) {
-                println!(
-                    "Cmd+Q target={} source={} policy={} adapter={} result=refused reason={}",
-                    inspection.app_identity,
-                    source.name(),
-                    policy.kind.name(),
-                    adapter.name,
-                    reason
-                );
-                return Err(reason.into());
-            }
+            let target = match compatibility_quit_target(adapter, &inspection) {
+                Ok(target) => target,
+                Err(reason) => {
+                    println!(
+                        "Cmd+Q target={} source={} policy={} adapter={} result=refused reason={}",
+                        inspection.app_identity,
+                        source.name(),
+                        policy.kind.name(),
+                        adapter.name,
+                        reason
+                    );
+                    return Err(reason);
+                }
+            };
             println!(
-                "Cmd+Q target={} source={} policy={} adapter={} action=application-quit method={}",
+                "Cmd+Q target={} source={} policy={} adapter={} action=request-graceful-quit method=application-adapter/{} xid=0x{:08x}",
                 inspection.app_identity,
                 source.name(),
                 policy.kind.name(),
                 adapter.name,
-                adapter.quit.name()
+                adapter.quit.name(),
+                target
             );
             if options.verbose {
                 print!("{}", report::render(&inspection, true));
@@ -868,63 +725,143 @@ fn handle_quit(options: RunOptions, hidden: &mut HiddenWindows) -> Result<(), Dy
             if options.dry_run {
                 return Ok(());
             }
-            let result = quit_with_compatibility_adapter(adapter, &inspection);
-            if result.is_ok() {
-                hidden.forget_identity(&inspection.app_identity);
-                for identity in adapter.window_identities {
-                    hidden.forget_identity(identity);
-                }
-            }
-            return result;
-        }
-    }
-    if method == QuitMethod::GenericValidatedPidTerm {
-        if let Err(error) = generic_process_pid(&inspection) {
+            control::request_close(target)?;
             println!(
-                "Cmd+Q target={} source={} policy={} result=refused reason={}",
+                "Cmd+Q target={} source={} policy={} adapter={} result=dispatched method=native-wm-delete xid=0x{:08x}",
                 inspection.app_identity,
                 source.name(),
                 policy.kind.name(),
-                error
+                adapter.name,
+                target
             );
-            return Err(error);
+            return Ok(());
         }
     }
-    println!(
-        "Cmd+Q target={} source={} policy={} adapter=none action=application-quit method={}",
-        inspection.app_identity,
-        source.name(),
-        policy.kind.name(),
-        quit_method_name(method)
-    );
     if options.verbose {
         print!("{}", report::render(&inspection, true));
     }
-    if options.dry_run {
-        return Ok(());
-    }
-
-    let result = match method {
-        QuitMethod::StrawberryMpris => quit_strawberry(&inspection),
-        QuitMethod::ThunarCli => command_status("thunar", &["--quit"]),
-        QuitMethod::GenericValidatedPidTerm => terminate_revalidated_pid(&inspection, true),
-        QuitMethod::ValidatedPidTerm => terminate_revalidated_pid(&inspection, false),
+    match method {
+        QuitMethod::StrawberryMpris => {
+            println!(
+                "Cmd+Q target={} source={} policy={} adapter=none action=request-graceful-quit method={}",
+                inspection.app_identity,
+                source.name(),
+                policy.kind.name(),
+                quit_method_name(method)
+            );
+            if options.dry_run {
+                return Ok(());
+            }
+            quit_strawberry()?;
+            println!(
+                "Cmd+Q target={} result=dispatched method={}",
+                inspection.app_identity,
+                quit_method_name(method)
+            );
+            Ok(())
+        }
+        QuitMethod::ThunarCli => {
+            println!(
+                "Cmd+Q target={} source={} policy={} adapter=none action=request-graceful-quit method={}",
+                inspection.app_identity,
+                source.name(),
+                policy.kind.name(),
+                quit_method_name(method)
+            );
+            if options.dry_run {
+                return Ok(());
+            }
+            command_status("thunar", &["--quit"])?;
+            println!(
+                "Cmd+Q target={} result=dispatched method={}",
+                inspection.app_identity,
+                quit_method_name(method)
+            );
+            Ok(())
+        }
+        QuitMethod::NativeCloseSingleWindow => {
+            let target = match single_native_quit_target(&inspection.meaningful_windows) {
+                Ok(target) => target,
+                Err(reason) => {
+                    println!(
+                        "Cmd+Q target={} source={} policy={} adapter=none result=refused reason={}",
+                        inspection.app_identity,
+                        source.name(),
+                        policy.kind.name(),
+                        reason
+                    );
+                    return Err(reason.into());
+                }
+            };
+            println!(
+                "Cmd+Q target={} source={} policy={} adapter=none action=request-graceful-quit method={} xid=0x{:08x}",
+                inspection.app_identity,
+                source.name(),
+                policy.kind.name(),
+                quit_method_name(method),
+                target
+            );
+            if options.dry_run {
+                return Ok(());
+            }
+            control::request_close(target)?;
+            println!(
+                "Cmd+Q target={} result=dispatched method={} xid=0x{:08x}",
+                inspection.app_identity,
+                quit_method_name(method),
+                target
+            );
+            Ok(())
+        }
         QuitMethod::CloseEachWindow => {
+            if inspection.meaningful_windows.is_empty() {
+                let reason = "refused-no-safe-quit: application has no meaningful top-level window";
+                println!(
+                    "Cmd+Q target={} source={} policy={} adapter=none result=refused reason={}",
+                    inspection.app_identity,
+                    source.name(),
+                    policy.kind.name(),
+                    reason
+                );
+                return Err(reason.into());
+            }
+            println!(
+                "Cmd+Q target={} source={} policy={} adapter=none action=request-graceful-quit method={} windows={}",
+                inspection.app_identity,
+                source.name(),
+                policy.kind.name(),
+                quit_method_name(method),
+                inspection.meaningful_windows.len()
+            );
+            if options.dry_run {
+                return Ok(());
+            }
             for window in &inspection.meaningful_windows {
                 control::request_close(window.xid)?;
             }
+            println!(
+                "Cmd+Q target={} result=dispatched method={} windows={}",
+                inspection.app_identity,
+                quit_method_name(method),
+                inspection.meaningful_windows.len()
+            );
             Ok(())
         }
-        QuitMethod::Unsupported => Err(format!(
-            "no safe whole-application quit method for {}",
-            inspection.app_identity
-        )
-        .into()),
-    };
-    if result.is_ok() {
-        hidden.forget_identity(&inspection.app_identity);
+        QuitMethod::Unsupported => {
+            let reason = format!(
+                "refused-no-safe-quit: no veto-capable quit method for {}",
+                inspection.app_identity
+            );
+            println!(
+                "Cmd+Q target={} source={} policy={} adapter=none result=refused reason={}",
+                inspection.app_identity,
+                source.name(),
+                policy.kind.name(),
+                reason
+            );
+            Err(reason.into())
+        }
     }
-    result
 }
 
 fn handle_event(
@@ -1237,9 +1174,8 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        generic_process_pid, inspect_close_target, is_adoptable_hidden,
-        revalidate_process_metadata, revalidate_same_process,
-        select_restore_candidate,
+        inspect_close_target, is_adoptable_hidden, revalidate_process_metadata,
+        select_restore_candidate, single_native_quit_target, top_level_close_target,
     };
     use crate::compatibility;
     use crate::identity;
@@ -1261,46 +1197,32 @@ mod tests {
         window
     }
 
-    fn strawberry_window(xid: u32, pid: u32) -> WindowFacts {
-        process_window(xid, "Strawberry", pid, "strawberry")
+    #[test]
+    fn single_window_generic_quit_targets_exact_native_window() {
+        let window = WindowFacts::test_window(10, "FeatherPad");
+        assert_eq!(single_native_quit_target(&[window]), Ok(10));
     }
 
     #[test]
-    fn strawberry_fallback_requires_same_freshly_validated_process() {
-        let original = strawberry_window(10, 1234);
-        let current = original.clone();
-        assert_eq!(
-            revalidate_same_process(&original, &current, "strawberry").expect("same process"),
-            1234
-        );
+    fn multi_window_generic_quit_refuses_without_a_kill_fallback() {
+        let first = WindowFacts::test_window(10, "FeatherPad");
+        let second = WindowFacts::test_window(20, "FeatherPad");
+        let error = single_native_quit_target(&[first, second]).expect_err("must refuse");
+        assert!(error.contains("refused-no-safe-quit"));
+        assert!(error.contains("2 meaningful top-level windows"));
     }
 
     #[test]
-    fn strawberry_fallback_rejects_pid_or_validation_changes() {
-        let original = strawberry_window(10, 1234);
+    fn shift_close_targets_exact_focused_main_or_transient_xid() {
+        let main = WindowFacts::test_window(10, "FeatherPad");
+        let inspection = identity::inspect(10, vec![main.clone()]).expect("main inspection");
+        assert_eq!(top_level_close_target(&inspection), Ok(10));
 
-        let mut changed_pid = strawberry_window(10, 5678);
-        assert!(revalidate_same_process(&original, &changed_pid, "strawberry").is_err());
-
-        changed_pid = original.clone();
-        changed_pid.pid_validated = false;
-        changed_pid.pid_validation = "process unavailable".to_string();
-        assert!(revalidate_same_process(&original, &changed_pid, "strawberry").is_err());
-
-        let mut changed_metadata = original.clone();
-        changed_metadata.process.as_mut().expect("process").command_line =
-            Some("strawberry --changed".to_string());
-        assert!(revalidate_same_process(&original, &changed_metadata, "strawberry").is_err());
-
-        let changed_identity = WindowFacts::test_window(10, "Other");
-        assert!(revalidate_same_process(&original, &changed_identity, "strawberry").is_err());
-    }
-
-    #[test]
-    fn generic_quit_accepts_one_stable_application_process() {
-        let window = process_window(10, "FeatherPad", 1234, "featherpad");
-        let inspection = identity::inspect(10, vec![window]).expect("inspection");
-        assert_eq!(generic_process_pid(&inspection).expect("safe PID"), 1234);
+        let mut dialog = WindowFacts::test_window(20, "FeatherPad");
+        dialog.transient_for = Some(10);
+        dialog.window_types = vec!["_NET_WM_WINDOW_TYPE_DIALOG".to_string()];
+        let inspection = identity::inspect(20, vec![main, dialog]).expect("dialog inspection");
+        assert_eq!(top_level_close_target(&inspection), Ok(20));
     }
 
     #[test]
@@ -1316,33 +1238,6 @@ mod tests {
         assert_eq!(inspection.focused_xid, 20);
         assert_eq!(inspection.app_identity, "thunar");
         assert!(inspect_close_target(&snapshot, 30).is_err());
-    }
-
-    #[test]
-    fn generic_quit_rejects_invalidated_or_mismatched_process_identity() {
-        let mut invalid = process_window(10, "FeatherPad", 1234, "featherpad");
-        invalid.pid_validated = false;
-        invalid.pid_validation = "process unavailable".to_string();
-        let inspection = identity::inspect(10, vec![invalid]).expect("inspection");
-        assert!(generic_process_pid(&inspection).is_err());
-
-        let mismatched = process_window(10, "FeatherPad", 1234, "unrelated-helper");
-        let inspection = identity::inspect(10, vec![mismatched]).expect("inspection");
-        assert!(generic_process_pid(&inspection).is_err());
-
-        let mut helper = process_window(10, "FeatherPad", 1234, "featherpad");
-        helper.process.as_mut().expect("process").command_line =
-            Some("featherpad --type=renderer".to_string());
-        let inspection = identity::inspect(10, vec![helper]).expect("inspection");
-        assert!(generic_process_pid(&inspection).is_err());
-    }
-
-    #[test]
-    fn generic_quit_rejects_multiple_window_pids() {
-        let first = process_window(10, "FeatherPad", 1234, "featherpad");
-        let second = process_window(20, "FeatherPad", 5678, "featherpad");
-        let inspection = identity::inspect(10, vec![first, second]).expect("inspection");
-        assert!(generic_process_pid(&inspection).is_err());
     }
 
     #[test]
