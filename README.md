@@ -100,7 +100,7 @@ Normal service logs contain startup, shutdown, lifecycle actions, refusals, and 
 
 The default is no longer a list of known application names. Any meaningful normal window with a stable normalized identity and acceptable class or validated-process evidence receives the ordinary generic policy. FeatherPad and Galculator were validated without application-specific rules.
 
-For Brave Browser, Brave Origin, and Thunderbird, Command+W first asks an AT-SPI internal-document provider about the focused X11 window. A known count above the application's persistent minimum invokes native `Ctrl+W`, allowing the application to retain confirmation and protected-state authority. A known final/base state uses MacLife's ordinary hidden-window marker. Missing accessibility, a failed query, multiple matching frames, a missing selected tab, or any other ambiguous association refuses rather than forwarding a potentially destructive native close.
+For Brave Browser, Brave Origin, and Thunderbird's Mail window, Command+W first asks an AT-SPI internal-document provider about the focused X11 window. A known count above the application's persistent minimum invokes native `Ctrl+W`, allowing the application to retain confirmation and protected-state authority. A known final/base state uses MacLife's ordinary hidden-window marker. Thunderbird's `Msgcompose` window instead receives native `WM_DELETE_WINDOW`, so Thunderbird can offer Save / Discard / Cancel for a draft. Missing accessibility, a failed query, multiple matching frames, a missing selected tab, or any other ambiguous Mail-window association refuses rather than forwarding a potentially destructive native close.
 
 Shift+Command+W is a separate top-level-window operation. Brave performs native `Ctrl+Shift+W`; Thunderbird and other ordinary X11 clients receive `WM_DELETE_WINDOW`. It is never interpreted as Command+W or Command+Q.
 
@@ -141,7 +141,7 @@ Current compatibility behavior:
 
 | Adapter | Window identity | Required process identity | Command+Q method |
 |---|---|---|---|
-| Thunderbird | `thunderbird-default` | `thunderbird-bin` | One validated logical window: native close; multiple: refuse |
+| Thunderbird | `thunderbird-default` | `thunderbird-bin` | Validated main Mail window: Thunderbird File → Quit action, with native draft prompts and cancellation |
 | GIMP 3 | `gimp` | `gimp-3-0` | One validated logical window: native close; multiple: refuse |
 | LibreOffice | module identities such as `libreoffice-writer` and `libreoffice-calc` | `soffice-bin` | One validated family window: native close; multiple: refuse |
 | Brave Origin / Browser | exact variant identity | `brave-browser` plus exact variant executable | One validated logical window: native close; multiple: refuse |

@@ -88,7 +88,7 @@ multiple windows receives its normal close request.
 | XFCE Terminal | `WM_DELETE_WINDOW` for the existing exact client-leader group | Native running-job confirmation remains authoritative; no shell/job signal |
 | ChatGPT | One exact native window close; multiple refuse | No process signal; native Electron lifecycle may keep the application in its tray |
 | Brave Origin / Brave Browser | One validated logical window receives native close; multiple refuse | Native tab/window warnings and veto remain available; no browser/helper process signal |
-| Thunderbird | One validated logical window receives native close; multiple refuse | Native compose/tab protection remains authoritative |
+| Thunderbird | Validated main Mail window invokes Thunderbird's own File → Quit action | Thunderbird coordinates open compose windows and retains Save / Discard / Cancel authority; no process signal or parallel window closes |
 | GIMP | One validated logical window receives native close; multiple refuse | Native edited-image confirmation remains authoritative |
 | LibreOffice | One validated family window receives native close; multiple refuse | Native document confirmation remains authoritative; no simultaneous family close race |
 | Spotify / Brave PWAs | One validated logical PWA window receives native close; multiple refuse | Shared browser process is never signaled |
@@ -98,6 +98,35 @@ Compatibility adapters still perform exact identity, executable, same-user PID,
 and fresh process-metadata validation where needed to scope the correct logical
 or family window. That evidence is now used only for safe target selection, not
 as authorization to terminate a process.
+
+### Thunderbird follow-up
+
+The original single-window native close was safe but insufficient when Inbox
+and an unsaved compose window were both open: generic multi-window refusal
+prevented a normal application quit. Thunderbird exposes a native File → Quit
+menu action on its main Mail frame. An exact native Ctrl+Q sent to the compose
+window physically showed Thunderbird's draft prompt; Cancel retained Inbox,
+the compose window, and the draft text. The main Mail frame's File → Quit
+action was then invoked directly and produced the same veto-capable prompt.
+
+MacLife now requires one `Mail / thunderbird-default` window, validates the
+Thunderbird process again, matches its AT-SPI frame, and invokes the unique
+File → Quit `click` action only when the Quit item advertises `<Control>Q`.
+The generic multi-window refusal remains in force for applications without
+an audited application-level quit action. The initial adapter prototype read
+`GetActions` fields as action names; Thunderbird's wire reply did not use that
+format, so it safely refused before Quit. The corrected adapter reads the
+dedicated `GetName`, `GetKeyBinding`, and `NActions` methods/properties.
+Its action search also needs to descend into the opened File menu; initially
+omitting `menu` from that search left File open and safely refused before Quit.
+
+The installed adapter was physically tested with Inbox and a dirty compose
+window on 2026-09-23. Cmd+Q dispatched `atspi-file-quit` and Thunderbird showed
+its native save prompt. After Cancel, both windows, the draft text, and the
+Thunderbird process remained. No delayed termination fallback ran. Focus moved
+through the Inbox and back to compose before the prompt, a known usability
+rough edge of invoking the main Mail window's menu. A clean-state quit is not
+yet physically recorded.
 
 ## Dirty FeatherPad physical validation
 
