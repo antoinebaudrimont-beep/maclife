@@ -138,8 +138,10 @@ running executable had been replaced by a Brave update and `/proc` reported
 Brave through its own menu and reopened it, Command+Q worked. FeatherPad's
 three-tab Command+W retest left two tabs. Thunderbird and Settings Manager
 passed their controls; the user reported FeatherPad's other controls as
-working. The existing dirty-document safety tests remain in the Rust suite;
-this milestone did not change those paths.
+working. A focused dirty-tab retest showed the native save prompt; after
+Cancel, the exact `DO NOT LOSE THIS TEXT` text and tab remained. The existing
+dirty-document safety tests also remain in the Rust suite; this milestone did
+not change those paths.
 
 ## Versioning and upstream direction
 
