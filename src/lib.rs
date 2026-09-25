@@ -14,6 +14,7 @@ pub mod runtime;
 pub mod signals;
 pub mod singleton;
 pub mod x11;
+pub mod xfwm4;
 
 use std::error::Error;
 

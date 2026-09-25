@@ -14,7 +14,7 @@ use crate::lifecycle::{
 use crate::model::{Disposition, Inspection, Snapshot, WindowFacts};
 use crate::signals::ShutdownSignals;
 use crate::singleton::{AcquireResult, SingletonGuard};
-use crate::{report, x11, DynError};
+use crate::{report, x11, xfwm4, DynError};
 use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::process::Command;
@@ -1204,6 +1204,11 @@ pub fn run(options: RunOptions) -> Result<(), DynError> {
         LIFECYCLE_PROTOCOL_VERSION,
         lifecycle_manager.window(),
         intent_devices.summary()
+    );
+    let integration = xfwm4::probe();
+    println!(
+        "xfwm4 integration: {} (installed {}; {})",
+        integration.state.name(), integration.installed_version, integration.reason
     );
 
     loop {

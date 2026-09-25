@@ -1,8 +1,8 @@
 use maclife::documents::{self, AtspiDocumentProvider, InternalDocumentProvider};
-use maclife::{identity, report, runtime, x11, DynError};
+use maclife::{identity, report, runtime, x11, xfwm4, DynError};
 
 fn usage() -> &'static str {
-    "Usage:\n  maclife inspect [--verbose]\n  maclife run [--dry-run] [--verbose] [--close-keycode N] [--quit-keycode N] [--close-window-keycode N]\n  maclife restore APPLICATION\n\nInspect is read-only. Run grabs the dedicated Toshy keys. Restore only activates a window explicitly marked as MacLife-hidden."
+    "Usage:\n  maclife inspect [--verbose]\n  maclife xfwm4-status [--machine]\n  maclife run [--dry-run] [--verbose] [--close-keycode N] [--quit-keycode N] [--close-window-keycode N]\n  maclife restore APPLICATION\n\nInspect and xfwm4-status are read-only. Run grabs the dedicated Toshy keys. Restore only activates a window explicitly marked as MacLife-hidden."
 }
 
 fn run() -> Result<(), DynError> {
@@ -14,6 +14,28 @@ fn run() -> Result<(), DynError> {
         return Ok(());
     }
     match command.as_deref() {
+        Some("xfwm4-status") => {
+            let machine = match args.next().as_deref() {
+                None => false,
+                Some("--machine") => true,
+                _ => return Err(usage().into()),
+            };
+            if args.next().is_some() {
+                return Err(usage().into());
+            }
+            let result = xfwm4::probe();
+            if machine {
+                println!("state={}", result.state.name());
+                println!("installed={}", result.installed_version);
+                println!("reason={}", result.reason);
+            } else {
+                println!(
+                    "xfwm4 integration: {} (installed {}; {})",
+                    result.state.name(), result.installed_version, result.reason
+                );
+            }
+            Ok(())
+        }
         Some("inspect") => {
             let mut verbose = false;
             for arg in args {
