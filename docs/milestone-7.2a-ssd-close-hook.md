@@ -1,5 +1,11 @@
 # Milestone 7.2A: xfwm4 SSD close hook
 
+> Historical note: 7.2A established the exact-XID xfwm4 transport, but its
+> original protocol-v1 receiver incorrectly reused `DocumentClose` semantics.
+> Milestone 7.2B supersedes that semantic design: a title-bar click is now the
+> distinct `WindowClose(XID)` intent and never consults internal tab/document
+> counts. See `docs/milestone-7.2b-titlebar-gaps.md`.
+
 Target: MX Linux 25.2, XFCE/X11
 
 Milestone 7.2A adds an opt-in path from xfwm4's server-side-decorated title-bar
@@ -16,7 +22,7 @@ xfwm4 CLOSE_BUTTON release
         -> exact client XID
         -> private X11 ClientMessage
         -> MacLife fresh X11 snapshot and XID validation
-        -> existing Close(XID) lifecycle policy
+        -> historical protocol-v1 Close(XID) lifecycle policy
 ```
 
 MacLife owns the screen-specific selection
@@ -33,10 +39,12 @@ wrong manager, stale/destroyed/unmanaged XID, and any target refused by the
 normal lifecycle policy. The supplied XID is authoritative; the current active
 window is never substituted for it.
 
-The existing Cmd+W and SSD paths share the same close-decision implementation.
-That preserves final-window hiding, multiple-window close, attached-dialog
-close, terminal safety, internal-document handling, and exclusions without
-duplicating application policy inside xfwm4.
+The original 7.2A implementation shared the Cmd+W document route with the SSD
+path. That was later shown to be semantically wrong for applications with
+internal tabs: Brave's title-bar X closed one tab. In the corrected architecture,
+the two paths still share XID validation, application identity, final-window
+policy, and exclusions, but `DocumentClose` and `WindowClose` have separate
+dispatch routes.
 
 ## xfwm4 patch and package
 

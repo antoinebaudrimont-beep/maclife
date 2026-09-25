@@ -2,7 +2,7 @@
 
 MacLife is an experimental macOS-style application lifecycle project for MX Linux/XFCE on X11.
 
-This repository contains the completed **Milestone 7.2A** server-side title-bar hook plus the **Milestone 6.2 unsaved-document safety correction**. MacLife is a reliable XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, and Thunderbird. It installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
+This repository contains the **Milestone 7.2A** server-side title-bar hook plus the **Milestone 6.2 unsaved-document safety correction**. MacLife is an XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. It installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
 
 ## Install for the current user
 
@@ -88,6 +88,22 @@ Normal service logs contain startup, shutdown, lifecycle actions, refusals, and 
 
 ## Lifecycle policy
 
+MacLife keeps four user intents separate:
+
+| Input | Intent | Scope |
+|---|---|---|
+| Command+W | `DocumentClose` | Close the active internal tab/document when supported; otherwise apply ordinary focused-window policy |
+| title-bar X | `WindowClose(XID)` | Close or preserve the exact clicked top-level window; never inspect or close an internal tab/document |
+| Shift+Command+W | `NativeTopLevelClose` | Ask the application to close the exact top-level window, preserving save/confirmation/veto behavior |
+| Command+Q | `ApplicationQuit` | Use an audited graceful application-level quit route, or refuse |
+
+For `WindowClose`, an attached dialog receives native `WM_DELETE_WINDOW` on
+its exact XID. One of several meaningful top-level windows also receives native
+`WM_DELETE_WINDOW`. The final meaningful window follows the application policy:
+ordinary applications are hidden and marked for restore, while narrow native or
+terminal safety exceptions retain their existing behavior. Internal document
+counts are deliberately absent from this decision.
+
 | Policy class | Command+W with 2+ meaningful windows | Command+W on final window | Command+Q |
 |---|---|---|---|
 | Supported internal-document application | Close the active native tab/document when its per-window count exceeds the persistent minimum | Iconify and mark the top-level window | Audited graceful adapter, one exact native window close, or refuse |
@@ -98,9 +114,9 @@ Normal service logs contain startup, shutdown, lifecycle actions, refusals, and 
 | Excluded desktop/internal client | Refuse | Refuse | Refuse |
 | Ambiguous identity/process association | Refuse when window identity is unsafe | Refuse | Refuse rather than guess |
 
-The default is no longer a list of known application names. Any meaningful normal window with a stable normalized identity and acceptable class or validated-process evidence receives the ordinary generic policy. FeatherPad and Galculator were validated without application-specific rules.
+The default is no longer a list of known application names. Any meaningful normal window with a stable normalized identity and acceptable class or validated-process evidence receives the ordinary generic policy. Galculator was validated without application-specific rules. FeatherPad uses that generic application-window policy plus a narrow document-tab adapter for Command+W.
 
-For Brave Browser, Brave Origin, and Thunderbird's Mail window, Command+W first asks an AT-SPI internal-document provider about the focused X11 window. A known count above the application's persistent minimum invokes native `Ctrl+W`, allowing the application to retain confirmation and protected-state authority. A known final/base state uses MacLife's ordinary hidden-window marker. Thunderbird's `Msgcompose` window instead receives native `WM_DELETE_WINDOW`, so Thunderbird can offer Save / Discard / Cancel for a draft. Missing accessibility, a failed query, multiple matching frames, a missing selected tab, or any other ambiguous Mail-window association refuses rather than forwarding a potentially destructive native close.
+For Brave Browser, Brave Origin, Thunderbird's Mail window, and FeatherPad, Command+W first asks an AT-SPI internal-document provider about the focused X11 window. A known count above the application's persistent minimum invokes the application's audited native document-close action, allowing it to retain confirmation and protected-state authority. Brave and Thunderbird use native `Ctrl+W`; FeatherPad uses its File → Close accessibility action (advertised as `Ctrl+Shift+Q` on the validated installation). A known final/base state uses MacLife's ordinary hidden-window marker. Thunderbird's `Msgcompose` window instead receives native `WM_DELETE_WINDOW`, so Thunderbird can offer Save / Discard / Cancel for a draft. Missing accessibility, a failed query, multiple matching frames, a missing selected tab, or any other ambiguous association refuses rather than forwarding a potentially destructive native close.
 
 Shift+Command+W is a separate top-level-window operation. Brave performs native `Ctrl+Shift+W`; Thunderbird and other ordinary X11 clients receive `WM_DELETE_WINDOW`. It is never interpreted as Command+W or Command+Q.
 
@@ -137,7 +153,7 @@ X11 has no universal application-level Quit protocol, and a correct PID associat
 
 ### Compatibility adapters
 
-The generic validator remains unchanged. A small centralized registry handles known cases where live X11 window identity and executable identity differ. Process compatibility adapters do not weaken Command+Q semantics. They prove an exact relationship from a listed window identity to a listed process identity, while retaining local PID, same-user, fresh `/proc`, unchanged-metadata, and unambiguous-window requirements. The separate internal-document layer affects only Command+W and top-level Shift+Command+W for its three supported identities.
+The generic validator remains unchanged. A small centralized registry handles known cases where live X11 window identity and executable identity differ. Process compatibility adapters do not weaken Command+Q semantics. They prove an exact relationship from a listed window identity to a listed process identity, while retaining local PID, same-user, fresh `/proc`, unchanged-metadata, and unambiguous-window requirements. The separate internal-document layer affects Command+W for four supported identities; top-level Shift+Command+W remains a distinct native window-close route.
 
 Current compatibility behavior:
 

@@ -67,7 +67,9 @@ git diff --check
 - [x] A cold MailReader launch has `GNOME_ACCESSIBILITY=1`.
 - [x] Thunderbird message tabs close individually; BaseOnly Inbox hides and
   restores.
-- [x] Title-bar Close(XID) follows the same existing tab/base policy.
+- [x] Historical protocol-v1 test: title-bar Close(XID) followed the tab/base
+  policy. This was found incorrect and is superseded by the protocol-v2
+  whole-window `WindowClose(XID)` route in Milestone 7.2B.
 - [x] A `mailto:` helper invocation does not create an accessibility-disabled
   Thunderbird process.
 - [x] Cmd+Q invokes Thunderbird's native File → Quit action and honors draft Cancel.
@@ -79,7 +81,9 @@ git diff --check
 The MailReader launch used PID 25723 with `GNOME_ACCESSIBILITY=1` and
 `MOZ_APP_LAUNCHER=/home/nupnus/.local/libexec/maclife-thunderbird`. Two
 message tabs closed separately, Inbox hid and restored as XID `0x05e0002c`,
-and title-bar Close(XID) preserved the same BaseOnly window. A `mailto:`
+and the historical title-bar Close(XID) preserved the same BaseOnly window. The
+7.2B title-bar route now ignores tab/base state and applies whole-window policy.
+A `mailto:`
 invocation reused PID 25723. A dirty compose window exposed
 `WM_CLASS=(Msgcompose, thunderbird-default)`; both Cmd+W and the outer X
 requested exact-XID native close and showed Thunderbird's save dialog. Cancel

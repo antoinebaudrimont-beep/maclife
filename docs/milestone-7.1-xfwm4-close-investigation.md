@@ -1,5 +1,10 @@
 # Milestone 7.1: title-bar close investigation
 
+> Superseded semantic proposal: this investigation correctly selected an
+> exact-XID private transport, but its proposal that title-bar X and Cmd+W share
+> one close backend was corrected in Milestone 7.2B. Title-bar X is a distinct
+> whole-window `WindowClose(XID)` intent; Cmd+W is `DocumentClose`.
+
 Status: investigation complete; no production behavior was changed.
 
 This milestone answers one narrow question: how can the visible title-bar close
