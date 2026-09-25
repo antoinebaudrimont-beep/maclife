@@ -2,7 +2,7 @@
 
 MacLife is an experimental macOS-style application lifecycle project for MX Linux/XFCE on X11.
 
-This repository contains the **Milestone 7.2A** server-side title-bar hook plus the **Milestone 6.2 unsaved-document safety correction**. MacLife is an XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. It installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
+This repository contains the **Milestone 7.2A** server-side title-bar hook, the **Milestone 6.2 unsaved-document safety correction**, and **Milestone 7.3** xfwm4 update diagnostics and explicit rebuild tooling. MacLife is an XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. It installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
 
 ## Install for the current user
 
@@ -15,6 +15,7 @@ From the repository:
 The installer builds an optimized binary, then installs only user-owned files:
 
 - `~/.local/bin/maclife`
+- `~/.local/bin/maclife-xfwm4` (explicit xfwm4 maintenance; no automatic install)
 - `~/.local/libexec/maclife-session-start`
 - `~/.local/libexec/maclife-brave-browser`
 - `~/.local/libexec/maclife-brave-origin`
@@ -24,6 +25,7 @@ The installer builds an optimized binary, then installs only user-owned files:
 - `~/.local/libexec/maclife-session-commands/thunderbird`
 - `~/.config/systemd/user/maclife.service`
 - `~/.config/systemd/user/maclife-launcher-refresh.{path,service}`
+- `~/.config/systemd/user/maclife-xfwm4-watch.{path,service}`
 - `~/.config/autostart/maclife.desktop`
 - user-level desktop overrides for Brave Browser, Brave Origin, and Thunderbird
 - a user-level XFCE MailReader helper for Thunderbird when Thunderbird is the selected mail reader
@@ -31,7 +33,7 @@ The installer builds an optimized binary, then installs only user-owned files:
 
 If a destination already contains different content, the installer first creates a timestamped backup next to it. Original user desktop launchers are also recorded in `~/.local/share/maclife/launcher-backups` and restored by the uninstaller; Brave web-app launcher originals are recorded separately in `~/.local/share/maclife/pwa-launcher-backups`. A pre-existing `~/.local/share/xfce4/helpers/thunderbird.desktop` is recorded in `~/.local/share/maclife/xfce-helper-backups` and restored exactly. A later user edit is never silently overwritten. Vendor files in `/usr/share/applications` and `/usr/share/xfce4/helpers` are never modified. It starts MacLife immediately when invoked from an active X11 session; use `./scripts/install-user.sh --no-start` to defer startup until the next XFCE login. No root access is used.
 
-The XFCE autostart entry runs a small session bridge. It verifies X11, imports the live `DISPLAY`, `XAUTHORITY`, desktop, and D-Bus variables into the systemd user manager, refreshes Brave-generated launchers, clears any previous rate-limit failure, and starts `maclife.service`. A user path unit repeats that refresh when Brave creates or replaces a web-app launcher; it performs no process scanning. There is no startup sleep. MacLife does not depend on Toshy's service: it can start before Toshy's virtual keyboard appears and dynamically refreshes XInput devices when Toshy starts or restarts.
+The XFCE autostart entry runs a small session bridge. It verifies X11, imports the live `DISPLAY`, `XAUTHORITY`, desktop, and D-Bus variables into the systemd user manager, refreshes Brave-generated launchers, clears any previous rate-limit failure, and starts `maclife.service`. A user path unit repeats that refresh when Brave creates or replaces a web-app launcher; it performs no process scanning. Another user path unit checks xfwm4 integration after package changes and warns if it needs attention; it never builds or installs packages. There is no startup sleep. MacLife does not depend on Toshy's service: it can start before Toshy's virtual keyboard appears and dynamically refreshes XInput devices when Toshy starts or restarts.
 
 Daily status and logs:
 
@@ -50,6 +52,25 @@ To replace the installed binary and support files after an update, rerun the ins
 ```sh
 ./scripts/uninstall-user.sh
 ```
+
+The normal installer does not replace the system's xfwm4 package. Check the
+installed integration and available distro updates with:
+
+```sh
+maclife xfwm4-status
+maclife-xfwm4 status
+maclife-xfwm4 check
+```
+
+If a newer distro xfwm4 replaces the local patched package, MacLife reports
+that its title-bar hook is unavailable while keyboard lifecycle controls
+remain. Review and explicitly rebuild/install a matching patch only after its
+source and package pass validation. See
+[xfwm4 update resilience](docs/milestone-7.3-xfwm4-update-resilience.md) for
+source requirements, commands, failure behavior, and rollback. To remove
+MacLife and explicitly return xfwm4 to the current stock distro package, use
+`./scripts/uninstall-user.sh --restore-stock-xfwm4`; ordinary uninstall only
+disables the MacLife xfwm4 setting and leaves the package archive intact.
 
 The uninstaller restores exact managed launcher snapshots. If a managed Brave web-app launcher was subsequently customized, it preserves those edits, removes the MacLife wrapper dependency only, and leaves a timestamped conflict backup. Deleted web-apps are not recreated. Timestamped backups remain in place.
 
