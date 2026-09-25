@@ -1,8 +1,15 @@
 # MacLife
 
-MacLife is an experimental macOS-style application lifecycle project for MX Linux/XFCE on X11.
+MacLife v0.7.0 is an experimental macOS-style application lifecycle layer for MX Linux/XFCE on X11. It separates closing a tab or window from quitting an application, while preserving the application's save prompts and right to cancel a destructive close.
 
-This repository contains the **Milestone 7.2A** server-side title-bar hook, the **Milestone 6.2 unsaved-document safety correction**, and **Milestone 7.3** xfwm4 update diagnostics and explicit rebuild tooling. MacLife is an XFCE/X11 user-session daemon with a conservative compatibility-adapter layer and evidence-backed internal-document lifecycle support for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. It installs as a systemd user service, starts from the live XFCE session without an arbitrary delay, and requires neither a repository checkout nor Cargo after installation.
+It runs as an XFCE/X11 user-session service with a conservative application policy and evidence-backed internal-tab handling for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. The title-bar X integration requires the separately patched, opt-in xfwm4 package; ordinary keyboard controls continue when that integration is unavailable. The user installer does not install or replace xfwm4. See [v0.7.0 release notes](docs/v0.7.0-release-notes.md) for changes and limitations.
+
+| Input | What it requests |
+|---|---|
+| Command+W | Close the active supported tab/document, or preserve the final application window |
+| Shift+Command+W | Ask the application to close the exact top-level window, including any save/confirmation prompt |
+| Command+Q | Request a graceful application quit when a safe route is known; otherwise refuse |
+| title-bar X | With patched xfwm4 server-side decorations, close or preserve the clicked window—not an internal tab |
 
 ## Install for the current user
 
@@ -53,6 +60,8 @@ To replace the installed binary and support files after an update, rerun the ins
 ./scripts/uninstall-user.sh
 ```
 
+Check the installed program version with `maclife --version`.
+
 The normal installer does not replace the system's xfwm4 package. Check the
 installed integration and available distro updates with:
 
@@ -61,6 +70,14 @@ maclife xfwm4-status
 maclife-xfwm4 status
 maclife-xfwm4 check
 ```
+
+For a future xfwm4 update, `maclife-xfwm4 build` attempts the narrow patch
+against the newest matching distro source and leaves the resulting package
+uninstalled. After reviewing the package, use `maclife-xfwm4 install
+/path/to/verified-package.deb` explicitly; `maclife-xfwm4 rollback stock`
+returns to the current stock distro package if needed. Building needs matching
+`deb-src` repository entries and xfwm4 build dependencies. There is no
+automatic privileged rebuild or package hold.
 
 If a newer distro xfwm4 replaces the local patched package, MacLife reports
 that its title-bar hook is unavailable while keyboard lifecycle controls
@@ -240,7 +257,7 @@ Desktop exclusions cover xfdesktop, xfce4-panel, Plank by its dock type, and Con
 - A dialog that omits `WM_TRANSIENT_FOR` is still attached when it advertises `_NET_WM_WINDOW_TYPE_DIALOG`; ownership then falls back to class/leader evidence.
 - An unusual user-facing utility window is intentionally excluded in Milestone 2. A later configuration layer may need a per-application opt-in.
 - Minimized/hidden normal windows remain meaningful and are counted. Mapping state is reported rather than used as an identity filter.
-- Internal-document support currently covers only Brave Browser, Brave Origin, and Thunderbird. Other tabbed applications retain their ordinary X11 window lifecycle until they have an evidence-backed provider.
+- Internal-document support currently covers Brave Browser, Brave Origin, Thunderbird, and FeatherPad. Other tabbed applications retain their ordinary X11 window lifecycle until they have an evidence-backed provider.
 - GIMP multi-window mode refuses Command+Q rather than dispatching parallel native close requests; individual windows retain confirmation authority through Shift+Command+W.
 - LibreOffice Command+Q sends native close only when exactly one validated family window exists. Multiple Writer/Calc/other supported module windows refuse rather than racing document confirmations.
 - The current Spotify launcher uses an isolated Brave user-data directory, but MacLife does not rely on that deployment detail. The adapter remains window-only and cannot terminate unrelated Brave processes.

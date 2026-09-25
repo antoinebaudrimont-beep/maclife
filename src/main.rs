@@ -2,7 +2,7 @@ use maclife::documents::{self, AtspiDocumentProvider, InternalDocumentProvider};
 use maclife::{identity, report, runtime, x11, xfwm4, DynError};
 
 fn usage() -> &'static str {
-    "Usage:\n  maclife inspect [--verbose]\n  maclife xfwm4-status [--machine]\n  maclife run [--dry-run] [--verbose] [--close-keycode N] [--quit-keycode N] [--close-window-keycode N]\n  maclife restore APPLICATION\n\nInspect and xfwm4-status are read-only. Run grabs the dedicated Toshy keys. Restore only activates a window explicitly marked as MacLife-hidden."
+    "Usage:\n  maclife --version\n  maclife inspect [--verbose]\n  maclife xfwm4-status [--machine]\n  maclife run [--dry-run] [--verbose] [--close-keycode N] [--quit-keycode N] [--close-window-keycode N]\n  maclife restore APPLICATION\n\nInspect and xfwm4-status are read-only. Run grabs the dedicated Toshy keys. Restore only activates a window explicitly marked as MacLife-hidden."
 }
 
 fn run() -> Result<(), DynError> {
@@ -11,6 +11,13 @@ fn run() -> Result<(), DynError> {
 
     if matches!(command.as_deref(), Some("-h" | "--help")) {
         println!("{}", usage());
+        return Ok(());
+    }
+    if matches!(command.as_deref(), Some("-V" | "--version")) {
+        if args.next().is_some() {
+            return Err(usage().into());
+        }
+        println!("maclife {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     match command.as_deref() {

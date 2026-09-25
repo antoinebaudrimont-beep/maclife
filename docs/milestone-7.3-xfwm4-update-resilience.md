@@ -145,16 +145,13 @@ not change those paths.
 
 ## Versioning and upstream direction
 
-The Cargo package still reports `0.1.0`; repository tags are `v0.5.0` and
-`v0.6.0`. These are not coherent as a single software-version stream. Do not
-infer `v0.7.0` from this milestone. Align Cargo, changelog/release notes, and
-Git tag in a separate release decision: `v0.x.0` for a substantial supported
-capability, `v0.x.y` for fixes, and `v1.0.0` only after a documented stable
-support contract. `v0.7.0` is a reasonable *future* release candidate because
-the complete server-side title-bar feature was added after `v0.6.0`, not
-because this work is Milestone 7.3. No tag is created here while Cargo and
-release documentation still disagree. Milestone numbers are project
-checkpoints, not versions.
+At the close of Milestone 7.3, Cargo still reported `0.1.0` while the repository
+had `v0.5.0` and `v0.6.0` tags. The subsequent v0.7.0 release preparation
+aligned Cargo, CLI output, and release notes. The new version reflects the
+server-side title-bar capability added since v0.6.0, not the number of this
+milestone. Going forward, `v0.x.0` marks a substantial supported capability,
+`v0.x.y` a fix, and `v1.0.0` a documented stable support contract. Milestone
+numbers remain project checkpoints, not software versions.
 
 The downstream patch changes only xfwm4's SSD close-button route when opted
 in, and already validates a manager selection and protocol version. An
