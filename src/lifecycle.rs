@@ -1,6 +1,25 @@
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleIntent {
+    DocumentClose,
+    WindowClose,
+    NativeTopLevelClose,
+    ApplicationQuit,
+}
+
+impl LifecycleIntent {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DocumentClose => "DocumentClose",
+            Self::WindowClose => "WindowClose",
+            Self::NativeTopLevelClose => "NativeTopLevelClose",
+            Self::ApplicationQuit => "ApplicationQuit",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LastWindowAction {
     Hide,
     NativeClose,
@@ -346,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_cmd_w_and_exact_xid_close_keep_final_window_preservation() {
+    fn generic_application_window_policy_preserves_the_final_window() {
         let policy = application_policy("featherpad", true);
         let decision = close_decision(policy, 1, FocusKind::Meaningful);
         assert_eq!(decision, CloseDecision::HideLast);

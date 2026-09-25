@@ -42,8 +42,8 @@ fi
 
 changelog_tmp=$source_dir/debian/changelog.maclife.tmp
 {
-    printf 'xfwm4 (4.20.0-1+maclife1) local; urgency=medium\n\n'
-    printf '  * Route opted-in server-side close buttons through MacLife.\n\n'
+    printf 'xfwm4 (4.20.0-1+maclife2) local; urgency=medium\n\n'
+    printf '  * Route opted-in server-side close buttons through explicit MacLife WindowClose protocol v2.\n\n'
     printf ' -- MacLife local package <maclife@localhost>  %s\n\n' "$(date -R)"
     cat "$source_dir/debian/changelog"
 } > "$changelog_tmp"

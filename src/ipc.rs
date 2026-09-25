@@ -8,12 +8,12 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, CURRENT_TIME};
 
-pub const LIFECYCLE_PROTOCOL_VERSION: u32 = 1;
-pub const CLOSE_REQUEST_ATOM: &str = "_MACLIFE_CLOSE_REQUEST";
+pub const LIFECYCLE_PROTOCOL_VERSION: u32 = 2;
+pub const WINDOW_CLOSE_REQUEST_ATOM: &str = "_MACLIFE_WINDOW_CLOSE_REQUEST";
 pub const PROTOCOL_VERSION_ATOM: &str = "_MACLIFE_LIFECYCLE_VERSION";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CloseRequest {
+pub struct WindowCloseRequest {
     pub target_xid: Window,
     pub timestamp: u32,
     pub request_id: u32,
@@ -22,44 +22,44 @@ pub struct CloseRequest {
 pub struct LifecycleManager {
     window: Window,
     selection: Atom,
-    close_request: Atom,
+    window_close_request: Atom,
 }
 
 fn intern(conn: &RustConnection, name: &str) -> Result<Atom, DynError> {
     Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
 }
 
-fn decode_close_request(
+fn decode_window_close_request(
     event: &ClientMessageEvent,
     manager_window: Window,
-    close_request_atom: Atom,
-) -> Result<Option<CloseRequest>, String> {
-    if event.type_ != close_request_atom {
+    window_close_request_atom: Atom,
+) -> Result<Option<WindowCloseRequest>, String> {
+    if event.type_ != window_close_request_atom {
         return Ok(None);
     }
     if event.window != manager_window {
         return Err(format!(
-            "close request addressed to unexpected manager window 0x{:08x}",
+            "window-close request addressed to unexpected manager window 0x{:08x}",
             event.window
         ));
     }
     if event.format != 32 {
         return Err(format!(
-            "close request uses format {}, expected 32",
+            "window-close request uses format {}, expected 32",
             event.format
         ));
     }
     let data = event.data.as_data32();
     if data[0] != LIFECYCLE_PROTOCOL_VERSION {
         return Err(format!(
-            "close request protocol version {} is incompatible with {}",
+            "window-close request protocol version {} is incompatible with {}",
             data[0], LIFECYCLE_PROTOCOL_VERSION
         ));
     }
     if data[1] == 0 {
-        return Err("close request target XID is zero".to_string());
+        return Err("window-close request target XID is zero".to_string());
     }
-    Ok(Some(CloseRequest {
+    Ok(Some(WindowCloseRequest {
         target_xid: data[1],
         timestamp: data[2],
         request_id: data[3],
@@ -99,7 +99,7 @@ impl LifecycleManager {
         .check()?;
 
         let version_atom = intern(conn, PROTOCOL_VERSION_ATOM)?;
-        let close_request = intern(conn, CLOSE_REQUEST_ATOM)?;
+        let window_close_request = intern(conn, WINDOW_CLOSE_REQUEST_ATOM)?;
         conn.change_property32(
             PropMode::REPLACE,
             window,
@@ -134,12 +134,15 @@ impl LifecycleManager {
         Ok(Self {
             window,
             selection,
-            close_request,
+            window_close_request,
         })
     }
 
-    pub fn decode(&self, event: &ClientMessageEvent) -> Result<Option<CloseRequest>, String> {
-        decode_close_request(event, self.window, self.close_request)
+    pub fn decode(
+        &self,
+        event: &ClientMessageEvent,
+    ) -> Result<Option<WindowCloseRequest>, String> {
+        decode_window_close_request(event, self.window, self.window_close_request)
     }
 
     pub fn lost_selection(&self, event: &SelectionClearEvent) -> bool {
@@ -154,7 +157,7 @@ impl LifecycleManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_close_request, CloseRequest, LIFECYCLE_PROTOCOL_VERSION,
+        decode_window_close_request, WindowCloseRequest, LIFECYCLE_PROTOCOL_VERSION,
     };
     use x11rb::protocol::xproto::ClientMessageEvent;
 
@@ -169,8 +172,8 @@ mod tests {
     fn decodes_exact_target_xid_without_focus_substitution() {
         let event = request([LIFECYCLE_PROTOCOL_VERSION, 0xfeed, 1234, 77, 0]);
         assert_eq!(
-            decode_close_request(&event, MANAGER, REQUEST_ATOM).expect("decode"),
-            Some(CloseRequest {
+            decode_window_close_request(&event, MANAGER, REQUEST_ATOM).expect("decode"),
+            Some(WindowCloseRequest {
                 target_xid: 0xfeed,
                 timestamp: 1234,
                 request_id: 77,
@@ -187,18 +190,33 @@ mod tests {
             [LIFECYCLE_PROTOCOL_VERSION, 0xfeed, 0, 1, 0],
         );
         assert_eq!(
-            decode_close_request(&event, MANAGER, REQUEST_ATOM).expect("decode"),
+            decode_window_close_request(&event, MANAGER, REQUEST_ATOM).expect("decode"),
+            None
+        );
+    }
+
+    #[test]
+    fn ignores_the_legacy_ambiguous_close_message() {
+        let legacy_close_atom = REQUEST_ATOM + 1;
+        let event = ClientMessageEvent::new(
+            32,
+            MANAGER,
+            legacy_close_atom,
+            [1, 0xfeed, 0, 1, 0],
+        );
+        assert_eq!(
+            decode_window_close_request(&event, MANAGER, REQUEST_ATOM).expect("decode"),
             None
         );
     }
 
     #[test]
     fn rejects_version_mismatch_zero_target_and_wrong_manager() {
-        let mismatch = request([LIFECYCLE_PROTOCOL_VERSION + 1, 0xfeed, 0, 1, 0]);
-        assert!(decode_close_request(&mismatch, MANAGER, REQUEST_ATOM).is_err());
+        let mismatch = request([LIFECYCLE_PROTOCOL_VERSION - 1, 0xfeed, 0, 1, 0]);
+        assert!(decode_window_close_request(&mismatch, MANAGER, REQUEST_ATOM).is_err());
 
         let zero = request([LIFECYCLE_PROTOCOL_VERSION, 0, 0, 1, 0]);
-        assert!(decode_close_request(&zero, MANAGER, REQUEST_ATOM).is_err());
+        assert!(decode_window_close_request(&zero, MANAGER, REQUEST_ATOM).is_err());
 
         let wrong_manager = ClientMessageEvent::new(
             32,
@@ -206,6 +224,6 @@ mod tests {
             REQUEST_ATOM,
             [LIFECYCLE_PROTOCOL_VERSION, 0xfeed, 0, 1, 0],
         );
-        assert!(decode_close_request(&wrong_manager, MANAGER, REQUEST_ATOM).is_err());
+        assert!(decode_window_close_request(&wrong_manager, MANAGER, REQUEST_ATOM).is_err());
     }
 }

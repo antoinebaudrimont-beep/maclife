@@ -102,6 +102,7 @@ pub fn close_decision(state: &InternalDocumentState) -> DocumentCloseDecision {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseDocumentMethod {
     ControlW,
+    FeatherPadFileClose,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +114,7 @@ pub enum CloseTopLevelMethod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProviderKind {
     Brave,
+    TabList,
     Thunderbird,
 }
 
@@ -149,6 +151,14 @@ const ADAPTERS: &[DocumentLifecycleAdapter] = &[
         kind: ProviderKind::Thunderbird,
         minimum_persistent: 1,
         close_document: CloseDocumentMethod::ControlW,
+        close_top_level: CloseTopLevelMethod::WmDelete,
+    },
+    DocumentLifecycleAdapter {
+        identity: "featherpad",
+        application_name: "FeatherPad",
+        kind: ProviderKind::TabList,
+        minimum_persistent: 1,
+        close_document: CloseDocumentMethod::FeatherPadFileClose,
         close_top_level: CloseTopLevelMethod::WmDelete,
     },
 ];
@@ -583,7 +593,9 @@ impl AtspiDocumentProvider {
         let mut tabs = Vec::new();
         for (child_destination, child_path) in self.children(destination, tab_list_path)? {
             let child_path = child_path.to_string();
-            if self.role(&child_destination, &child_path)? != "page tab" {
+            if self.discovery_role(&child_destination, &child_path)?.as_deref()
+                != Some("page tab")
+            {
                 continue;
             }
             let states = self.states(&child_destination, &child_path)?;
@@ -667,10 +679,14 @@ impl AtspiDocumentProvider {
             None if adapter.kind == ProviderKind::Thunderbird => Err(
                 "matched Thunderbird frame has no tab strip and no healthy Mail marker".to_string(),
             ),
-            None => Err(
+            None if adapter.kind == ProviderKind::Brave => Err(
                 "Brave accessibility tab strip is unavailable; relaunch from the managed launcher"
                     .to_string(),
             ),
+            None => Err(format!(
+                "{} accessibility tab strip is unavailable",
+                adapter.application_name
+            )),
         }
     }
 
@@ -749,6 +765,51 @@ impl AtspiDocumentProvider {
         }
         Err(last_error)
     }
+
+    pub fn close_featherpad_document(&self, window: &WindowFacts) -> Result<(), String> {
+        let frame = select_frame(window, &self.frame_candidates("FeatherPad")?)?;
+        let (file_destination, file_path) =
+            self.unique_named_descendant(&frame.destination, &frame.path, "menu item", "File")?;
+        let file_path = file_path.to_string();
+        let popup_menus: Vec<_> = self
+            .children(&file_destination, &file_path)?
+            .into_iter()
+            .filter_map(|(destination, path)| {
+                let path = path.to_string();
+                (self.role(&destination, &path).as_deref() == Ok("popup menu"))
+                    .then_some((destination, path))
+            })
+            .collect();
+        let [(popup_destination, popup_path)] = popup_menus.as_slice() else {
+            return Err(format!(
+                "FeatherPad File menu has {} popup menus; expected exactly one",
+                popup_menus.len()
+            ));
+        };
+        let close_items: Vec<_> = self
+            .children(popup_destination, popup_path)?
+            .into_iter()
+            .filter_map(|(destination, path)| {
+                let path = path.to_string();
+                (self.role(&destination, &path).as_deref() == Ok("menu item")
+                    && self.name(&destination, &path).as_deref() == Ok("Close"))
+                .then_some((destination, path))
+            })
+            .collect();
+        let [(close_destination, close_path)] = close_items.as_slice() else {
+            return Err(format!(
+                "FeatherPad File menu has {} Close items; expected exactly one",
+                close_items.len()
+            ));
+        };
+        if self.action_count(close_destination, close_path)? != 1
+            || self.action_name(close_destination, close_path, 0)? != "Press"
+            || self.action_binding(close_destination, close_path, 0)? != "Ctrl+Shift+Q"
+        {
+            return Err("FeatherPad File → Close action no longer matches the audited native action".into());
+        }
+        self.do_action(close_destination, close_path, 0)
+    }
 }
 
 impl InternalDocumentProvider for AtspiDocumentProvider {
@@ -818,6 +879,7 @@ fn is_discovery_container(role: &str) -> bool {
             | "section"
             | "unknown"
             | "split pane"
+            | "splitter"
             | "layered pane"
             | "root pane"
             | "menu bar"
@@ -904,6 +966,12 @@ mod tests {
         assert!(!is_discovery_container("menu"));
         assert!(is_action_discovery_container("menu"));
         assert!(!is_action_discovery_container("menu item"));
+    }
+
+    #[test]
+    fn qt_splitter_is_a_bounded_tab_discovery_container() {
+        assert!(is_discovery_container("splitter"));
+        assert!(!is_discovery_container("push button"));
     }
 
     #[test]
@@ -1179,6 +1247,30 @@ mod tests {
         assert_eq!(
             adapter.close_top_level,
             super::CloseTopLevelMethod::WmDelete
+        );
+    }
+
+    #[test]
+    fn featherpad_uses_tab_count_for_document_close_and_wm_delete_for_window_close() {
+        let adapter = adapter_for("featherpad").expect("FeatherPad adapter");
+        assert_eq!(adapter.application_name, "FeatherPad");
+        assert_eq!(adapter.minimum_persistent, 1);
+        assert_eq!(adapter.kind, super::ProviderKind::TabList);
+        assert_eq!(
+            adapter.close_document,
+            super::CloseDocumentMethod::FeatherPadFileClose
+        );
+        assert_eq!(
+            adapter.close_top_level,
+            super::CloseTopLevelMethod::WmDelete
+        );
+        assert_eq!(
+            close_decision(&known(3)),
+            DocumentCloseDecision::CloseActiveDocument
+        );
+        assert_eq!(
+            close_decision(&known(1)),
+            DocumentCloseDecision::PreserveTopLevelWindow
         );
     }
 }

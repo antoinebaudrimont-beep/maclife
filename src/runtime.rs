@@ -6,10 +6,10 @@ use crate::documents::{
 };
 use crate::identity::{self, normalized_app_identity};
 use crate::input::{IntentDevices, KeyPhase, LifecycleChordTracker};
-use crate::ipc::{CloseRequest, LifecycleManager, LIFECYCLE_PROTOCOL_VERSION};
+use crate::ipc::{LifecycleManager, WindowCloseRequest, LIFECYCLE_PROTOCOL_VERSION};
 use crate::lifecycle::{
-    self, ActiveTarget, ApplicationPolicy, CloseDecision, FocusKind, HiddenWindows, PolicyKind,
-    QuitMethod,
+    self, ActiveTarget, ApplicationPolicy, CloseDecision, FocusKind, HiddenWindows,
+    LifecycleIntent, PolicyKind, QuitMethod,
 };
 use crate::model::{Disposition, Inspection, Snapshot, WindowFacts};
 use crate::signals::ShutdownSignals;
@@ -79,6 +79,25 @@ fn action_name(decision: &CloseDecision) -> &'static str {
         CloseDecision::NativeCloseLast => "native-close-last-window",
         CloseDecision::Refuse(_) => "refuse",
     }
+}
+
+fn application_window_close_decision(
+    inspection: &Inspection,
+) -> (ApplicationPolicy, CloseDecision, Option<String>) {
+    let focus = focus_kind(inspection);
+    let (policy, ineligible_reason) = policy_for(inspection);
+    if documents::is_thunderbird_compose_window(inspection) {
+        // Compose is a document-owning top-level window. Its native close path
+        // must retain Thunderbird's Save / Discard / Cancel authority even if
+        // it happens to be the last meaningful Thunderbird window.
+        return (policy, CloseDecision::CloseFocused, ineligible_reason);
+    }
+    let decision = lifecycle::close_decision(
+        policy,
+        inspection.meaningful_windows.len(),
+        focus,
+    );
+    (policy, decision, ineligible_reason)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,7 +306,43 @@ fn inspect_close_target(snapshot: &Snapshot, target_xid: u32) -> Result<Inspecti
     identity::inspect(target_xid, snapshot.windows.clone())
 }
 
-fn handle_close_inspection(
+fn dispatch_application_window_close(
+    options: RunOptions,
+    hidden: &mut HiddenWindows,
+    inspection: &Inspection,
+    source: &str,
+) -> Result<(), DynError> {
+    let (policy, decision, ineligible_reason) = application_window_close_decision(inspection);
+    let adapter = compatibility::adapter_for(&inspection.app_identity)
+        .map(|adapter| adapter.name)
+        .unwrap_or("none");
+    println!(
+        "{} target={} meaningful_windows={} policy={} adapter={} action={} xid=0x{:08x}",
+        source,
+        inspection.app_identity,
+        inspection.meaningful_windows.len(),
+        policy.kind.name(),
+        adapter,
+        action_name(&decision),
+        inspection.focused_xid
+    );
+    if options.verbose {
+        print!("{}", report::render(inspection, true));
+    }
+    if options.dry_run {
+        return Ok(());
+    }
+
+    match decision {
+        CloseDecision::CloseFocused | CloseDecision::NativeCloseLast => {
+            control::request_close(inspection.focused_xid)
+        }
+        CloseDecision::HideLast => hide_and_remember(hidden, inspection),
+        CloseDecision::Refuse(reason) => Err(ineligible_reason.unwrap_or(reason).into()),
+    }
+}
+
+fn handle_document_close_inspection(
     options: RunOptions,
     hidden: &mut HiddenWindows,
     document_provider: &mut AtspiDocumentProvider,
@@ -351,6 +406,9 @@ fn handle_close_inspection(
                     CloseDocumentMethod::ControlW => {
                         control::close_active_document(inspection.focused_xid)
                     }
+                    CloseDocumentMethod::FeatherPadFileClose => document_provider
+                        .close_featherpad_document(&inspection.identity_window)
+                        .map_err(Into::into),
                 }
             }
             DocumentCloseDecision::PreserveTopLevelWindow => {
@@ -359,41 +417,7 @@ fn handle_close_inspection(
             DocumentCloseDecision::Refuse(reason) => Err(reason.into()),
         };
     }
-    let (policy, ineligible_reason) = policy_for(&inspection);
-    let decision = lifecycle::close_decision(
-        policy,
-        inspection.meaningful_windows.len(),
-        focus,
-    );
-    let adapter = compatibility::adapter_for(&inspection.app_identity)
-        .map(|adapter| adapter.name)
-        .unwrap_or("none");
-    println!(
-        "{} target={} meaningful_windows={} policy={} adapter={} action={} xid=0x{:08x}",
-        source,
-        inspection.app_identity,
-        inspection.meaningful_windows.len(),
-        policy.kind.name(),
-        adapter,
-        action_name(&decision),
-        inspection.focused_xid
-    );
-    if options.verbose {
-        print!("{}", report::render(&inspection, true));
-    }
-    if options.dry_run {
-        return Ok(());
-    }
-
-    match decision {
-        CloseDecision::CloseFocused | CloseDecision::NativeCloseLast => {
-            control::request_close(inspection.focused_xid)
-        }
-        CloseDecision::HideLast => {
-            hide_and_remember(hidden, &inspection)
-        }
-        CloseDecision::Refuse(reason) => Err(ineligible_reason.unwrap_or(reason).into()),
-    }
+    dispatch_application_window_close(options, hidden, &inspection, source)
 }
 
 fn handle_close(
@@ -405,21 +429,20 @@ fn handle_close(
         confirm_current_interaction(hidden, "button", true, options.verbose)?;
     }
     let (snapshot, inspection) = focused_inspection()?;
-    handle_close_inspection(
+    handle_document_close_inspection(
         options,
         hidden,
         document_provider,
         snapshot,
         inspection,
-        "Cmd+W",
+        &format!("{} source=Cmd+W", LifecycleIntent::DocumentClose.name()),
     )
 }
 
-fn handle_close_request(
+fn handle_window_close_request(
     options: RunOptions,
     hidden: &mut HiddenWindows,
-    document_provider: &mut AtspiDocumentProvider,
-    request: CloseRequest,
+    request: WindowCloseRequest,
 ) -> Result<(), DynError> {
     let snapshot = x11::collect_snapshot()?;
     reconcile_hidden(hidden, &snapshot);
@@ -428,17 +451,10 @@ fn handle_close_request(
         apply_confirmed_interaction(hidden, &inspection, "ssd-close-button", options.verbose);
     }
     let source = format!(
-        "Close(XID) source=xfwm4 request_id={} timestamp={}",
-        request.request_id, request.timestamp
+        "{} source=xfwm4 request_id={} timestamp={}",
+        LifecycleIntent::WindowClose.name(), request.request_id, request.timestamp
     );
-    handle_close_inspection(
-        options,
-        hidden,
-        document_provider,
-        snapshot,
-        inspection,
-        &source,
-    )
+    dispatch_application_window_close(options, hidden, &inspection, &source)
 }
 
 fn hide_and_remember(
@@ -496,8 +512,8 @@ fn handle_close_top_level(
         CloseTopLevelMethod::WmDelete => "native-wm-delete",
     };
     println!(
-        "Shift+Cmd+W focused={} policy=top-level-window action=request-native-window-close method={} xid=0x{:08x}",
-        inspection.app_identity, method_name, target
+        "{} source=Shift+Cmd+W focused={} policy=top-level-window action=request-native-window-close method={} xid=0x{:08x}",
+        LifecycleIntent::NativeTopLevelClose.name(), inspection.app_identity, method_name, target
     );
     if options.verbose {
         print!("{}", report::render(&inspection, true));
@@ -992,16 +1008,16 @@ fn handle_event(
         Event::ClientMessage(event) => match lifecycle_manager.decode(&event) {
             Ok(Some(request)) => {
                 if let Err(error) =
-                    handle_close_request(options, hidden, document_provider, request)
+                    handle_window_close_request(options, hidden, request)
                 {
                     eprintln!(
-                        "MacLife Close(XID) request_id={} target=0x{:08x} refused/failed: {error}",
+                        "MacLife WindowClose(XID) request_id={} target=0x{:08x} refused/failed: {error}",
                         request.request_id, request.target_xid
                     );
                 }
             }
             Ok(None) => {}
-            Err(error) => eprintln!("MacLife private close request refused: {error}"),
+            Err(error) => eprintln!("MacLife private window-close request refused: {error}"),
         },
         Event::SelectionClear(event) if lifecycle_manager.lost_selection(&event) => {
             eprintln!(
@@ -1263,13 +1279,14 @@ pub fn restore(identity: &str) -> Result<(), DynError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        close_route, compatibility_quit_target_from_inspection, inspect_close_target,
-        is_adoptable_hidden, revalidate_process_metadata, select_restore_candidate,
-        single_native_quit_target, top_level_close_target, CloseRoute,
+        application_window_close_decision, close_route,
+        compatibility_quit_target_from_inspection, inspect_close_target, is_adoptable_hidden,
+        revalidate_process_metadata, select_restore_candidate, single_native_quit_target,
+        top_level_close_target, CloseRoute,
     };
     use crate::compatibility;
     use crate::identity;
-    use crate::lifecycle::FocusKind;
+    use crate::lifecycle::{CloseDecision, FocusKind, LifecycleIntent};
     use crate::model::{ProcessInfo, Snapshot, WindowFacts, WmClass};
 
     fn process_window(xid: u32, class: &str, pid: u32, executable: &str) -> WindowFacts {
@@ -1317,6 +1334,67 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_intents_remain_explicit_and_distinct() {
+        assert_eq!(LifecycleIntent::DocumentClose.name(), "DocumentClose");
+        assert_eq!(LifecycleIntent::WindowClose.name(), "WindowClose");
+        assert_eq!(
+            LifecycleIntent::NativeTopLevelClose.name(),
+            "NativeTopLevelClose"
+        );
+        assert_eq!(LifecycleIntent::ApplicationQuit.name(), "ApplicationQuit");
+    }
+
+    #[test]
+    fn tab_aware_document_close_does_not_change_window_close_semantics() {
+        let brave = WindowFacts::test_window(10, "Brave-origin");
+        let inspection = identity::inspect(10, vec![brave]).expect("inspection");
+
+        assert_eq!(
+            close_route(&inspection, FocusKind::Meaningful),
+            CloseRoute::InternalDocuments
+        );
+        assert_eq!(
+            application_window_close_decision(&inspection).1,
+            CloseDecision::HideLast
+        );
+    }
+
+    #[test]
+    fn window_close_uses_top_level_count_and_exact_dialog_target() {
+        let first = WindowFacts::test_window(10, "Brave-origin");
+        let second = WindowFacts::test_window(20, "Brave-origin");
+        let inspection = identity::inspect(10, vec![first.clone(), second])
+            .expect("multi-window inspection");
+        assert_eq!(
+            application_window_close_decision(&inspection).1,
+            CloseDecision::CloseFocused
+        );
+        assert_eq!(inspection.focused_xid, 10);
+
+        let mut dialog = WindowFacts::test_window(30, "Brave-origin");
+        dialog.transient_for = Some(10);
+        dialog.window_types = vec!["_NET_WM_WINDOW_TYPE_DIALOG".to_string()];
+        let inspection = identity::inspect(30, vec![first, dialog])
+            .expect("dialog inspection");
+        assert_eq!(
+            application_window_close_decision(&inspection).1,
+            CloseDecision::CloseFocused
+        );
+        assert_eq!(inspection.focused_xid, 30);
+    }
+
+    #[test]
+    fn standalone_settings_dialog_uses_final_window_preservation() {
+        let mut settings = WindowFacts::test_window(40, "Xfce4-settings-manager");
+        settings.window_types = vec!["_NET_WM_WINDOW_TYPE_DIALOG".to_string()];
+        let inspection = identity::inspect(40, vec![settings]).expect("inspection");
+        assert_eq!(
+            application_window_close_decision(&inspection).1,
+            CloseDecision::HideLast
+        );
+    }
+
+    #[test]
     fn thunderbird_compose_closes_natively_without_changing_mail_tab_routing() {
         let mut mail = WindowFacts::test_window(10, "thunderbird-default");
         mail.wm_class = Some(WmClass {
@@ -1343,6 +1421,31 @@ mod tests {
             CloseRoute::ThunderbirdCompose
         );
         assert_eq!(compose_inspection.focused_xid, 20);
+        assert_eq!(
+            application_window_close_decision(&compose_inspection).1,
+            CloseDecision::CloseFocused
+        );
+
+        let compose_only = identity::inspect(20, vec![compose_inspection.focused_window.clone()])
+            .expect("compose-only inspection");
+        assert_eq!(
+            application_window_close_decision(&compose_only).1,
+            CloseDecision::CloseFocused
+        );
+    }
+
+    #[test]
+    fn featherpad_document_close_uses_internal_tabs_but_window_close_does_not() {
+        let window = WindowFacts::test_window(10, "FeatherPad");
+        let inspection = identity::inspect(10, vec![window]).expect("inspection");
+        assert_eq!(
+            close_route(&inspection, FocusKind::Meaningful),
+            CloseRoute::InternalDocuments
+        );
+        assert_eq!(
+            application_window_close_decision(&inspection).1,
+            CloseDecision::HideLast
+        );
     }
 
     #[test]

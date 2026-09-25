@@ -20,6 +20,8 @@ const EXCLUDED_TYPES: &[&str] = &[
 
 const ATTACHED_TYPES: &[&str] = &["_NET_WM_WINDOW_TYPE_DIALOG"];
 
+const STANDALONE_DIALOG_IDENTITIES: &[&str] = &["xfce4-settings-manager"];
+
 const EXCLUDED_IDENTITIES: &[&str] = &[
     "conky",
     "xfce4-panel",
@@ -154,6 +156,9 @@ pub fn disposition(window: &WindowFacts) -> Disposition {
         .iter()
         .find(|kind| ATTACHED_TYPES.contains(&kind.as_str()))
     {
+        if STANDALONE_DIALOG_IDENTITIES.contains(&identity.as_str()) {
+            return Disposition::Meaningful;
+        }
         return Disposition::Attached(format!("attached {kind}"));
     }
 
@@ -332,6 +337,29 @@ mod tests {
         menu.transient_for = Some(1);
         menu.window_types = vec!["_NET_WM_WINDOW_TYPE_POPUP_MENU".to_string()];
         assert!(matches!(disposition(&menu), Disposition::Excluded(_)));
+    }
+
+    #[test]
+    fn treats_only_the_settings_manager_unowned_dialog_as_standalone() {
+        let mut settings = WindowFacts::test_window(5, "Xfce4-settings-manager");
+        settings.window_types = vec!["_NET_WM_WINDOW_TYPE_DIALOG".to_string()];
+        assert_eq!(disposition(&settings), Disposition::Meaningful);
+
+        let mut ordinary = WindowFacts::test_window(6, "FeatherPad");
+        ordinary.window_types = vec!["_NET_WM_WINDOW_TYPE_DIALOG".to_string()];
+        assert!(matches!(disposition(&ordinary), Disposition::Attached(_)));
+
+        settings.transient_for = Some(9);
+        assert!(matches!(disposition(&settings), Disposition::Attached(_)));
+    }
+
+    #[test]
+    fn settings_manager_is_generic_lifecycle_eligible() {
+        let mut settings = WindowFacts::test_window(5, "Xfce4-settings-manager");
+        settings.window_types = vec!["_NET_WM_WINDOW_TYPE_DIALOG".to_string()];
+        let inspection = inspect(5, vec![settings]).expect("settings inspection");
+        assert_eq!(inspection.meaningful_windows.len(), 1);
+        assert!(generic_lifecycle_eligibility(&inspection).is_ok());
     }
 
     #[test]

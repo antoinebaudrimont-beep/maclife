@@ -20,8 +20,8 @@ index 2b85066..c234707 100644
 +#define MACLIFE_CLOSE_SETTING          "/general/maclife_close_button"
 +#define MACLIFE_MANAGER_SELECTION      "_MACLIFE_LIFECYCLE_MANAGER_S%d"
 +#define MACLIFE_PROTOCOL_VERSION_ATOM  "_MACLIFE_LIFECYCLE_VERSION"
-+#define MACLIFE_CLOSE_REQUEST_ATOM     "_MACLIFE_CLOSE_REQUEST"
-+#define MACLIFE_PROTOCOL_VERSION       1L
++#define MACLIFE_WINDOW_CLOSE_REQUEST_ATOM "_MACLIFE_WINDOW_CLOSE_REQUEST"
++#define MACLIFE_PROTOCOL_VERSION       2L
 +
  /* Useful macros */
  #define START_ICONIC(c) \
@@ -103,7 +103,7 @@ index 2b85066..c234707 100644
 +    }
 +    XFree (property);
 +
-+    request_atom = XInternAtom (dpy, MACLIFE_CLOSE_REQUEST_ATOM, False);
++    request_atom = XInternAtom (dpy, MACLIFE_WINDOW_CLOSE_REQUEST_ATOM, False);
 +    request_id++;
 +    if (request_id == 0)
 +    {
