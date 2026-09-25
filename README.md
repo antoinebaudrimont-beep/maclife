@@ -11,11 +11,18 @@ It runs as an XFCE/X11 user-session service with a conservative application poli
 | Command+Q | Request a graceful application quit when a safe route is known; otherwise refuse |
 | title-bar X | With patched xfwm4 server-side decorations, close or preserve the clicked window—not an internal tab |
 
+Current limits: XFCE/X11 only; Command+H and Command+M are not implemented.
+The client-drawn X buttons in the GitHub Brave PWA and GNOME Calendar remain
+outside MacLife. See the [release notes](docs/v0.7.0-release-notes.md) for details.
+
 ## Install for the current user
 
-From the repository:
+On the supported XFCE/X11 desktop, with Rust 1.85 or newer, install from the
+v0.7.0 tagged source:
 
 ```sh
+git clone --branch v0.7.0 --depth 1 https://github.com/antoinebaudrimont-beep/maclife.git
+cd maclife
 ./scripts/install-user.sh
 ```
 
