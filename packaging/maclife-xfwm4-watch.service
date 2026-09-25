@@ -1,0 +1,6 @@
+[Unit]
+Description=Check MacLife xfwm4 integration after package changes
+
+[Service]
+Type=oneshot
+ExecStart=-%h/.local/bin/maclife-xfwm4 check --notify

@@ -115,8 +115,10 @@ autostart_dir=${HOME}/.config/autostart
 application_dir=${HOME}/.local/share/applications
 launcher_state_dir=${HOME}/.local/share/maclife/launcher-backups
 session_command_dir=${HOME}/.local/libexec/maclife-session-commands
+xfwm4_package_dir=$helper_dir/maclife-xfwm4-package
 mkdir -p -- "$binary_dir" "$helper_dir" "$unit_dir" "$autostart_dir" \
-    "$application_dir" "$launcher_state_dir" "$session_command_dir"
+    "$application_dir" "$launcher_state_dir" "$session_command_dir" \
+    "$xfwm4_package_dir"
 
 temporary_dir=$(mktemp -d)
 trap 'rm -rf -- "$temporary_dir"' EXIT HUP INT TERM
@@ -127,6 +129,12 @@ sed "s|@SESSION_START@|$helper_dir/maclife-session-start|g" \
 systemctl --user stop maclife.service >/dev/null 2>&1 || true
 systemctl --user stop maclife-launcher-refresh.path >/dev/null 2>&1 || true
 install_atomic "$repo_dir/target/release/maclife" "$binary_dir/maclife" 0755
+install_atomic "$repo_dir/scripts/maclife-xfwm4" \
+    "$binary_dir/maclife-xfwm4" 0755
+install_atomic "$repo_dir/packaging/xfwm4/build-debian-package.sh" \
+    "$xfwm4_package_dir/build-debian-package.sh" 0755
+install_atomic "$repo_dir/packaging/xfwm4/0001-maclife-close-button.patch" \
+    "$xfwm4_package_dir/0001-maclife-close-button.patch" 0644
 install_atomic "$repo_dir/packaging/maclife-session-start" \
     "$helper_dir/maclife-session-start" 0755
 install_atomic "$repo_dir/packaging/maclife-brave-browser" \
@@ -148,6 +156,10 @@ install_atomic "$repo_dir/packaging/maclife-launcher-refresh.service" \
     "$unit_dir/maclife-launcher-refresh.service" 0644
 install_atomic "$repo_dir/packaging/maclife-launcher-refresh.path" \
     "$unit_dir/maclife-launcher-refresh.path" 0644
+install_atomic "$repo_dir/packaging/maclife-xfwm4-watch.service" \
+    "$unit_dir/maclife-xfwm4-watch.service" 0644
+install_atomic "$repo_dir/packaging/maclife-xfwm4-watch.path" \
+    "$unit_dir/maclife-xfwm4-watch.path" 0644
 install_atomic "$desktop_temp" "$autostart_dir/maclife.desktop" 0644
 install_launcher_override \
     /usr/share/applications/brave-browser.desktop \
@@ -170,6 +182,8 @@ fi
 systemctl --user daemon-reload
 systemctl --user enable maclife-launcher-refresh.path
 systemctl --user restart maclife-launcher-refresh.path
+systemctl --user enable maclife-xfwm4-watch.path
+systemctl --user restart maclife-xfwm4-watch.path
 
 if [ "$start_service" = true ] && [ "${XDG_SESSION_TYPE:-}" = "x11" ] \
     && [ -n "${DISPLAY:-}" ]; then
@@ -181,3 +195,4 @@ fi
 
 printf '%s\n' "Status: systemctl --user status maclife.service"
 printf '%s\n' "Logs:   journalctl --user -u maclife.service"
+"$binary_dir/maclife-xfwm4" check || true

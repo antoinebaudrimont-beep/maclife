@@ -1,0 +1,437 @@
+#!/bin/sh
+# Explicit, unprivileged xfwm4 package maintenance. Only install/rollback call sudo.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+if [ -x "$repo_dir/packaging/xfwm4/build-debian-package.sh" ]; then
+    build_helper=$repo_dir/packaging/xfwm4/build-debian-package.sh
+else
+    build_helper=${HOME}/.local/libexec/maclife-xfwm4-package/build-debian-package.sh
+fi
+data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
+state_dir=${MACLIFE_XFWM4_STATE_DIR:-$data_home/maclife/xfwm4}
+packages_dir=$state_dir/packages
+manifest=$state_dir/current.manifest
+maclife_binary=${MACLIFE_BINARY:-${HOME}/.local/bin/maclife}
+architecture=$(dpkg --print-architecture)
+scratch_dir=
+cleanup_scratch() {
+    if [ -n "$scratch_dir" ] && [ -d "$scratch_dir" ]; then
+        rm -rf -- "$scratch_dir"
+    fi
+}
+trap cleanup_scratch EXIT HUP INT TERM
+
+usage() {
+    printf '%s\n' 'Usage: maclife-xfwm4 status | check [--notify] | archive-current DEB | archive-stock | build [--dsc DSC] [--revision N] | install DEB | rollback [stock|previous]' >&2
+    exit 2
+}
+
+installed_version() {
+    dpkg-query -W -f='${Version}' xfwm4 2>/dev/null || true
+}
+
+base_version() {
+    printf '%s\n' "$1" | sed -E 's/\+maclife[0-9]+$//'
+}
+
+distro_version() {
+    local best versions version
+    best=
+    versions=$(apt-cache madison xfwm4 | awk -F '|' '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2 }')
+    for version in $versions; do
+        case "$version" in *+maclife*) continue ;; esac
+        if [ -z "$best" ] || dpkg --compare-versions "$version" gt "$best"; then
+            best=$version
+        fi
+    done
+    printf '%s\n' "$best"
+}
+
+integration_state() {
+    local detected
+    if [ ! -x "$maclife_binary" ]; then
+        printf '%s\n' unverified
+        return
+    fi
+    detected=$("$maclife_binary" xfwm4-status --machine 2>/dev/null | sed -n 's/^state=//p' || true)
+    printf '%s\n' "${detected:-unverified}"
+}
+
+package_version() {
+    dpkg-deb -f "$1" Version
+}
+
+valid_build_manifest() {
+    local deb version base
+    deb=$1
+    [ -f "$deb.manifest" ] || return 1
+    version=$(package_version "$deb")
+    base=$(base_version "$version")
+    [ "$(sed -n 's/^version=//p' "$deb.manifest")" = "$version" ] && \
+        [ "$(sed -n 's/^base=//p' "$deb.manifest")" = "$base" ] && \
+        [ "$(sed -n 's/^protocol=//p' "$deb.manifest")" = 2 ] && \
+        [ "$(sed -n 's/^source_origin=//p' "$deb.manifest")" = apt-authenticated ] && \
+        [ "$(sed -n 's/^package_sha256=//p' "$deb.manifest")" = \
+          "$(sha256sum "$deb" | awk '{print $1}')" ]
+}
+
+validate_deb() {
+    local deb expected
+    deb=$1
+    expected=$2
+    [ -f "$deb" ] || { printf 'Package not found: %s\n' "$deb" >&2; exit 1; }
+    [ "$(dpkg-deb -f "$deb" Package)" = xfwm4 ] || {
+        printf 'Not an xfwm4 package: %s\n' "$deb" >&2; exit 1;
+    }
+    [ "$(dpkg-deb -f "$deb" Architecture)" = "$architecture" ] || {
+        printf 'Wrong package architecture: %s\n' "$deb" >&2; exit 1;
+    }
+    [ "$(package_version "$deb")" = "$expected" ] || {
+        printf 'Package version differs from expected %s: %s\n' "$expected" "$deb" >&2; exit 1;
+    }
+}
+
+extracted_binary() {
+    local deb extraction_dir
+    deb=$1
+    extraction_dir=$2
+    mkdir -p "$extraction_dir"
+    dpkg-deb -x "$deb" "$extraction_dir"
+    [ -f "$extraction_dir/usr/bin/xfwm4" ] || {
+        printf 'Package lacks /usr/bin/xfwm4\n' >&2; exit 1;
+    }
+}
+
+archive_package() {
+    local deb destination
+    deb=$1
+    destination=$packages_dir/$(basename "$deb")
+    mkdir -p "$packages_dir"
+    if [ -e "$destination" ]; then
+        cmp -s "$deb" "$destination" || {
+            printf 'Archive collision with different bytes: %s\n' "$destination" >&2; exit 1;
+        }
+    else
+        install -m 0644 "$deb" "$destination"
+    fi
+    printf '%s\n' "$destination"
+}
+
+find_archived_version() {
+    local wanted deb
+    wanted=$1
+    for deb in "$packages_dir"/*.deb; do
+        [ -f "$deb" ] || continue
+        if [ "$(package_version "$deb")" = "$wanted" ]; then
+            printf '%s\n' "$deb"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_matching_build() {
+    local wanted_base best_version best_file deb version
+    wanted_base=$1
+    best_version=
+    best_file=
+    for deb in "$packages_dir"/*.deb; do
+        [ -f "$deb" ] || continue
+        version=$(package_version "$deb")
+        [ "$(base_version "$version")" = "$wanted_base" ] || continue
+        case "$version" in *+maclife[0-9]*) ;; *) continue ;; esac
+        valid_build_manifest "$deb" || continue
+        if [ -z "$best_version" ] || dpkg --compare-versions "$version" gt "$best_version"; then
+            best_version=$version
+            best_file=$deb
+        fi
+    done
+    [ -n "$best_file" ] || return 1
+    printf '%s\n' "$best_file"
+}
+
+archive_current() {
+    local deb current
+    deb=$1
+    current=$(installed_version)
+    validate_deb "$deb" "$current"
+    scratch_dir=$(mktemp -d /tmp/maclife-xfwm4-extract.XXXXXX)
+    extracted_binary "$deb" "$scratch_dir"
+    if ! cmp -s /usr/bin/xfwm4 "$scratch_dir/usr/bin/xfwm4"; then
+        printf 'Package binary does not match the installed xfwm4 binary\n' >&2
+        exit 1
+    fi
+    archive_package "$deb"
+}
+
+archive_stock() {
+    local version found
+    version=$1
+    if found=$(find_archived_version "$version"); then
+        printf '%s\n' "$found"
+        return
+    fi
+    mkdir -p "$packages_dir"
+    (cd "$packages_dir" && apt-get download "xfwm4=$version") >&2
+    found=$(find_archived_version "$version") || {
+        printf 'Downloaded stock package was not found\n' >&2; exit 1;
+    }
+    validate_deb "$found" "$version"
+    printf '%s\n' "$found"
+}
+
+status() {
+    local current distro state found
+    current=$(installed_version)
+    distro=$(distro_version)
+    state=$(integration_state)
+    printf 'installed=%s integration=%s distro=%s\n' "$current" "$state" "${distro:-unavailable}"
+    if [ -z "$distro" ]; then
+        printf 'newer_distro=unknown (repository metadata unavailable)\n'
+    elif [ -n "$current" ] && \
+        dpkg --compare-versions "$distro" gt "$(base_version "$current")"; then
+        printf 'newer_distro=yes\n'
+        if found=$(find_matching_build "$distro"); then
+            printf 'matching_build=%s\n' "$found"
+        else
+            printf 'matching_build=none\n'
+        fi
+    else
+        printf 'newer_distro=no\n'
+    fi
+}
+
+check() {
+    local notify report state newer warning signature previous
+    notify=$1
+    report=$(status)
+    printf '%s\n' "$report"
+    state=$(printf '%s\n' "$report" | sed -n 's/^installed=.* integration=\([^ ]*\) distro=.*/\1/p')
+    newer=$(printf '%s\n' "$report" | sed -n 's/^newer_distro=//p')
+    if [ "$state" = compatible ] && [ "$newer" = no ]; then
+        printf 'xfwm4 integration: compatible\n'
+        return 0
+    fi
+    warning='MacLife xfwm4 title-bar integration needs review; keyboard shortcuts remain available. Run maclife-xfwm4 status.'
+    printf '%s\n' "$warning" >&2
+    if [ "$notify" = true ] && command -v notify-send >/dev/null 2>&1; then
+        mkdir -p "$state_dir"
+        signature=$(printf '%s\n' "$report" | sha256sum | awk '{print $1}')
+        previous=$(sed -n '1p' "$state_dir/last-notified" 2>/dev/null || true)
+        if [ "$signature" != "$previous" ]; then
+            notify-send -u critical 'MacLife xfwm4 integration needs review' "$warning" || true
+            printf '%s\n' "$signature" >"$state_dir/last-notified"
+        fi
+    fi
+    return 1
+}
+
+build_package() {
+    local dsc revision distro current target workspace descriptor source_origin
+    local archived patch_file package_manifest
+    dsc=$1
+    revision=$2
+    distro=$(distro_version)
+    [ -n "$distro" ] || { printf 'No distro xfwm4 version is available\n' >&2; exit 1; }
+    current=$(installed_version)
+    target=${distro}+maclife${revision}
+    dpkg --compare-versions "$target" gt "$current" || {
+        printf 'Refusing build that would not advance installed xfwm4 %s\n' "$current" >&2
+        exit 1
+    }
+    if find_archived_version "$target" >/dev/null 2>&1; then
+        printf 'A build for %s is already archived\n' "$target" >&2; exit 1
+    fi
+    mkdir -p "$state_dir"
+    workspace=$(mktemp -d "$state_dir/build.XXXXXX")
+    printf 'Build workspace: %s\n' "$workspace"
+    if [ -n "$dsc" ]; then
+        [ -f "$dsc" ] || { printf 'Source descriptor not found: %s\n' "$dsc" >&2; exit 1; }
+        descriptor=$dsc
+        source_origin=local-unverified
+    else
+        (cd "$workspace" && apt-get source --download-only "xfwm4=$distro") || {
+            printf 'Source download failed. Enable matching deb-src entries or use --dsc.\n' >&2
+            exit 1
+        }
+        set -- "$workspace"/xfwm4_*.dsc
+        [ "$#" -eq 1 ] && [ -f "$1" ] || {
+            printf 'Expected one xfwm4 source descriptor in %s\n' "$workspace" >&2; exit 1
+        }
+        descriptor=$1
+        source_origin=apt-authenticated
+    fi
+    dpkg-source --require-strong-checksums -x "$descriptor" "$workspace/source"
+    "$build_helper" \
+        "$workspace/source" "$distro" "$revision"
+    set -- "$workspace"/xfwm4_"$target"_"$architecture".deb
+    [ "$#" -eq 1 ] && [ -f "$1" ] || {
+        printf 'Expected built package is missing from %s\n' "$workspace" >&2; exit 1
+    }
+    validate_deb "$1" "$target"
+    extracted_binary "$1" "$workspace/extracted"
+    if ! grep -aqF '_MACLIFE_WINDOW_CLOSE_REQUEST' "$workspace/extracted/usr/bin/xfwm4"; then
+        printf 'Built package lacks the MacLife protocol-v2 marker\n' >&2; exit 1
+    fi
+    archived=$(archive_package "$1")
+    patch_file=$(dirname "$build_helper")/0001-maclife-close-button.patch
+    package_manifest=$archived.manifest
+    {
+        printf 'version=%s\n' "$target"
+        printf 'base=%s\n' "$distro"
+        printf 'protocol=2\n'
+        printf 'source_origin=%s\n' "$source_origin"
+        printf 'package_sha256=%s\n' "$(sha256sum "$archived" | awk '{print $1}')"
+        printf 'binary_sha256=%s\n' "$(sha256sum "$workspace/extracted/usr/bin/xfwm4" | awk '{print $1}')"
+        printf 'source_dsc_sha256=%s\n' "$(sha256sum "$descriptor" | awk '{print $1}')"
+        printf 'patch_sha256=%s\n' "$(sha256sum "$patch_file" | awk '{print $1}')"
+    } >"$package_manifest"
+    printf 'Built package: %s\n' "$archived"
+    sha256sum "$archived"
+}
+
+write_manifest() {
+    local version binary temporary
+    version=$1
+    binary=$2
+    mkdir -p "$state_dir"
+    temporary=$(mktemp "$state_dir/manifest.XXXXXX")
+    {
+        printf 'version=%s\n' "$version"
+        printf 'protocol=2\n'
+        printf 'binary_sha256=%s\n' "$(sha256sum "$binary" | awk '{print $1}')"
+    } >"$temporary"
+    chmod 0600 "$temporary"
+    mv -f "$temporary" "$manifest"
+}
+
+install_package() {
+    local deb version distro base current recorded_binary_hash archived
+    deb=$1
+    valid_build_manifest "$deb" || {
+        printf 'Candidate has no valid authenticated MacLife build manifest: %s\n' "$deb" >&2
+        exit 1
+    }
+    version=$(package_version "$deb")
+    validate_deb "$deb" "$version"
+    distro=$(distro_version)
+    base=$(base_version "$version")
+    [ -n "$distro" ] && [ "$base" = "$distro" ] || {
+        printf 'Refusing package that does not match the newest distro xfwm4 %s\n' "$distro" >&2
+        exit 1
+    }
+    current=$(installed_version)
+    dpkg --compare-versions "$version" gt "$current" || {
+        printf 'Refusing non-upgrade install from %s to %s\n' "$current" "$version" >&2
+        exit 1
+    }
+    if ! find_archived_version "$current" >/dev/null 2>&1; then
+        printf 'Current package %s is not archived; run archive-current DEB first\n' "$current" >&2
+        exit 1
+    fi
+    scratch_dir=$(mktemp -d /tmp/maclife-xfwm4-extract.XXXXXX)
+    extracted_binary "$deb" "$scratch_dir"
+    grep -aqF '_MACLIFE_WINDOW_CLOSE_REQUEST' "$scratch_dir/usr/bin/xfwm4" || {
+        printf 'Candidate lacks the protocol-v2 hook\n' >&2; exit 1
+    }
+    recorded_binary_hash=$(sed -n 's/^binary_sha256=//p' "$deb.manifest")
+    [ "$recorded_binary_hash" = "$(sha256sum "$scratch_dir/usr/bin/xfwm4" | awk '{print $1}')" ] || {
+        printf 'Candidate binary differs from the build manifest\n' >&2; exit 1
+    }
+    archived=$(archive_package "$deb")
+    archive_stock "$distro" >/dev/null
+    printf 'Installing %s; current %s and stock %s are archived.\n' "$version" "$current" "$distro"
+    sudo apt-get install "$archived"
+    [ "$(installed_version)" = "$version" ] || {
+        printf 'Installed package version differs after apt operation\n' >&2; exit 1
+    }
+    cmp -s /usr/bin/xfwm4 "$scratch_dir/usr/bin/xfwm4" || {
+        printf 'Installed binary differs from validated candidate\n' >&2; exit 1
+    }
+    printf '%s\n' "$current" >"$state_dir/previous.version"
+    write_manifest "$version" /usr/bin/xfwm4
+    printf 'Installed; log out and back in to load the new xfwm4 binary.\n'
+}
+
+rollback() {
+    local choice version deb latest
+    choice=$1
+    case "$choice" in
+        stock)
+            version=$(distro_version)
+            [ -n "$version" ] || { printf 'No stock distro package is available\n' >&2; exit 1; }
+            deb=$(archive_stock "$version")
+            ;;
+        previous)
+            [ -f "$state_dir/previous.version" ] || {
+                printf 'No previous package version was recorded\n' >&2; exit 1
+            }
+            version=$(sed -n '1p' "$state_dir/previous.version")
+            deb=$(find_archived_version "$version") || {
+                printf 'Previous package %s is not archived\n' "$version" >&2; exit 1
+            }
+            latest=$(distro_version)
+            if [ -n "$latest" ] && dpkg --compare-versions \
+                "$(base_version "$version")" lt "$latest"; then
+                printf 'Previous package is older than current distro xfwm4; use rollback stock instead\n' >&2
+                exit 1
+            fi
+            ;;
+        *) usage ;;
+    esac
+    validate_deb "$deb" "$version"
+    if [ -n "${DISPLAY:-}" ] && command -v xfconf-query >/dev/null 2>&1; then
+        xfconf-query -c xfwm4 -p /general/maclife_close_button -s false || {
+            printf 'Could not disable MacLife title-bar setting; refusing rollback\n' >&2; exit 1
+        }
+    fi
+    sudo apt-get install --allow-downgrades "$deb"
+    [ "$(installed_version)" = "$version" ] || {
+        printf 'Rollback package version differs after apt operation\n' >&2; exit 1
+    }
+    if [ "$choice" = stock ] || \
+        ! grep -aqF '_MACLIFE_WINDOW_CLOSE_REQUEST' /usr/bin/xfwm4; then
+        [ ! -e "$manifest" ] || rm -f -- "$manifest"
+    else
+        write_manifest "$version" /usr/bin/xfwm4
+    fi
+    printf 'Rolled back to %s; log out and back in to load xfwm4.\n' "$version"
+}
+
+command=${1:-}
+shift || true
+case "$command" in
+    status) [ "$#" -eq 0 ] || usage; status ;;
+    check)
+        notify=false
+        if [ "${1:-}" = --notify ]; then notify=true; shift; fi
+        [ "$#" -eq 0 ] || usage
+        check "$notify"
+        ;;
+    archive-current) [ "$#" -eq 1 ] || usage; archive_current "$1" ;;
+    archive-stock)
+        [ "$#" -eq 0 ] || usage
+        stock=$(distro_version)
+        [ -n "$stock" ] || { printf 'No stock xfwm4 package is available\n' >&2; exit 1; }
+        archive_stock "$stock"
+        ;;
+    build)
+        dsc=
+        revision=1
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --dsc) [ "$#" -ge 2 ] || usage; dsc=$2; shift 2 ;;
+                --revision) [ "$#" -ge 2 ] || usage; revision=$2; shift 2 ;;
+                *) usage ;;
+            esac
+        done
+        case "$revision" in ''|*[!0-9]*) usage ;; esac
+        [ "$revision" -gt 0 ] || usage
+        build_package "$dsc" "$revision"
+        ;;
+    install) [ "$#" -eq 1 ] || usage; install_package "$1" ;;
+    rollback) [ "$#" -eq 1 ] || usage; rollback "$1" ;;
+    *) usage ;;
+esac

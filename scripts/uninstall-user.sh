@@ -1,6 +1,32 @@
 #!/bin/sh
 set -eu
 
+restore_stock=false
+if [ "${1:-}" = '--restore-stock-xfwm4' ] && [ "$#" -eq 1 ]; then
+    restore_stock=true
+elif [ "$#" -ne 0 ]; then
+    printf 'Usage: %s [--restore-stock-xfwm4]\n' "$0" >&2
+    exit 2
+fi
+
+xfwm4_tool=${HOME}/.local/bin/maclife-xfwm4
+installed_xfwm4=$(dpkg-query -W -f='${Version}' xfwm4 2>/dev/null || true)
+if [ "$restore_stock" = true ]; then
+    [ -x "$xfwm4_tool" ] || {
+        printf 'MacLife xfwm4 rollback tool is unavailable; refusing uninstall\n' >&2
+        exit 1
+    }
+    "$xfwm4_tool" rollback stock
+elif [ -n "${DISPLAY:-}" ] && command -v xfconf-query >/dev/null 2>&1; then
+    if ! xfconf-query -c xfwm4 -p /general/maclife_close_button -s false; then
+        printf 'Could not disable MacLife xfwm4 close-button setting; refusing uninstall\n' >&2
+        exit 1
+    fi
+elif [ -n "$installed_xfwm4" ] && [ "$installed_xfwm4" != "${installed_xfwm4%+maclife*}" ]; then
+    printf 'Patched xfwm4 is installed. Disable /general/maclife_close_button in X11 or use --restore-stock-xfwm4 before uninstalling.\n' >&2
+    exit 1
+fi
+
 restore_launcher() {
     launcher_name=$1
     target_file="${HOME}/.local/share/applications/$launcher_name"
@@ -70,6 +96,7 @@ if [ -x "${HOME}/.local/libexec/maclife-plank-thunderbird" ]; then
 fi
 systemctl --user stop maclife.service >/dev/null 2>&1 || true
 systemctl --user disable --now maclife-launcher-refresh.path >/dev/null 2>&1 || true
+systemctl --user disable --now maclife-xfwm4-watch.path >/dev/null 2>&1 || true
 if [ -x "${HOME}/.local/libexec/maclife-launcher-refresh" ]; then
     "${HOME}/.local/libexec/maclife-launcher-refresh" --restore-all
 fi
@@ -79,6 +106,7 @@ fi
 restore_xsessionrc
 rm -f -- \
     "${HOME}/.local/bin/maclife" \
+    "${HOME}/.local/bin/maclife-xfwm4" \
     "${HOME}/.local/libexec/maclife-session-start" \
     "${HOME}/.local/libexec/maclife-brave-browser" \
     "${HOME}/.local/libexec/maclife-brave-origin" \
@@ -90,8 +118,13 @@ rm -f -- \
     "${HOME}/.config/systemd/user/maclife.service" \
     "${HOME}/.config/systemd/user/maclife-launcher-refresh.service" \
     "${HOME}/.config/systemd/user/maclife-launcher-refresh.path" \
+    "${HOME}/.config/systemd/user/maclife-xfwm4-watch.service" \
+    "${HOME}/.config/systemd/user/maclife-xfwm4-watch.path" \
+    "${HOME}/.local/libexec/maclife-xfwm4-package/build-debian-package.sh" \
+    "${HOME}/.local/libexec/maclife-xfwm4-package/0001-maclife-close-button.patch" \
     "${HOME}/.config/autostart/maclife.desktop"
 rmdir -- "${HOME}/.local/libexec/maclife-session-commands" >/dev/null 2>&1 || true
+rmdir -- "${HOME}/.local/libexec/maclife-xfwm4-package" >/dev/null 2>&1 || true
 restore_launcher brave-browser.desktop
 restore_launcher brave-origin.desktop
 restore_launcher thunderbird.desktop

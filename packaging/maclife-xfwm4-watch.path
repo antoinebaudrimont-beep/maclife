@@ -1,0 +1,10 @@
+[Unit]
+Description=Notice xfwm4 package changes for MacLife
+
+[Path]
+PathChanged=/var/lib/dpkg/status
+PathChanged=/usr/bin/xfwm4
+Unit=maclife-xfwm4-watch.service
+
+[Install]
+WantedBy=default.target
