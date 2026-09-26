@@ -1400,6 +1400,59 @@ mod tests {
     }
 
     #[test]
+    fn final_kitty_document_and_window_close_preserve_but_native_close_is_separate() {
+        let kitty = process_window(10, "kitty", 123, "kitty");
+        let inspection = identity::inspect(10, vec![kitty]).expect("kitty inspection");
+        assert_eq!(inspection.meaningful_windows.len(), 1);
+        assert_eq!(
+            close_route(&inspection, FocusKind::Meaningful),
+            CloseRoute::ApplicationWindows
+        );
+        let (policy, decision, _) = application_window_close_decision(&inspection);
+        assert_eq!(decision, CloseDecision::HideLast);
+        assert_eq!(
+            policy.quit,
+            crate::lifecycle::QuitMethod::NativeCloseSingleWindow
+        );
+        // Shift+Cmd+W and single-window Cmd+Q request the exact native close;
+        // Kitty, not MacLife, decides whether its jobs permit destruction.
+        assert_eq!(top_level_close_target(&inspection), Ok(10));
+        assert_eq!(
+            single_native_quit_target(&inspection.meaningful_windows),
+            Ok(10)
+        );
+    }
+
+    #[test]
+    fn kitty_shared_process_without_leaders_counts_all_top_level_windows() {
+        let first = process_window(10, "kitty", 123, "kitty");
+        let mut second = process_window(20, "kitty", 123, "kitty");
+        second.mapped = false;
+        second.maclife_hidden = true;
+        let snapshot = Snapshot {
+            active_window: 10,
+            windows: vec![first.clone(), second],
+        };
+        // The clicked XID wins over focus, and a hidden sibling is still an
+        // application window, not evidence that the clicked one is final.
+        let clicked = inspect_close_target(&snapshot, 20).expect("clicked kitty");
+        assert_eq!(clicked.focused_xid, 20);
+        assert_eq!(clicked.meaningful_windows.len(), 2);
+        assert_eq!(
+            application_window_close_decision(&clicked).1,
+            CloseDecision::CloseFocused
+        );
+        assert_eq!(top_level_close_target(&clicked), Ok(20));
+        assert!(single_native_quit_target(&clicked.meaningful_windows).is_err());
+
+        let final_window = identity::inspect(10, vec![first]).expect("remaining kitty");
+        assert_eq!(
+            application_window_close_decision(&final_window).1,
+            CloseDecision::HideLast
+        );
+    }
+
+    #[test]
     fn thunderbird_compose_closes_natively_without_changing_mail_tab_routing() {
         let mut mail = WindowFacts::test_window(10, "thunderbird-default");
         mail.wm_class = Some(WmClass {
