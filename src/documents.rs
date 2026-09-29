@@ -534,6 +534,7 @@ impl AtspiDocumentProvider {
 
     fn discover_tab_list(
         &self,
+        adapter_kind: ProviderKind,
         destination: &str,
         frame_path: &str,
     ) -> Result<(Option<String>, bool), String> {
@@ -558,7 +559,21 @@ impl AtspiDocumentProvider {
                 mail_marker = true;
             }
             if role == "page tab list" {
-                tab_lists.push(node_path);
+                let candidate = if adapter_kind == ProviderKind::Brave {
+                    let child_roles = self
+                        .children(&node_destination, &node_path)?
+                        .into_iter()
+                        .map(|(child_destination, child_path)| {
+                            self.discovery_role(&child_destination, child_path.as_str())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    tab_list_is_candidate(adapter_kind, &child_roles)
+                } else {
+                    true
+                };
+                if candidate {
+                    tab_lists.push(node_path);
+                }
                 continue;
             }
             if depth >= DISCOVERY_DEPTH_LIMIT || !is_discovery_container(&role) {
@@ -571,13 +586,7 @@ impl AtspiDocumentProvider {
             }
         }
 
-        match tab_lists.len() {
-            0 => Ok((None, mail_marker)),
-            1 => Ok((tab_lists.pop(), mail_marker)),
-            count => Err(format!(
-                "AT-SPI frame exposes {count} page-tab lists; association is ambiguous"
-            )),
-        }
+        Ok((select_tab_list(tab_lists)?, mail_marker))
     }
 
     fn inspect_tab_list(
@@ -656,7 +665,7 @@ impl AtspiDocumentProvider {
             ));
         }
         let (tab_list_path, mail_marker) =
-            self.discover_tab_list(&cached.destination, &cached.frame_path)?;
+            self.discover_tab_list(adapter.kind, &cached.destination, &cached.frame_path)?;
         match tab_list_path {
             Some(path) => {
                 let (state, count, selected_path) = self.inspect_tab_list(
@@ -868,6 +877,27 @@ fn connect_atspi() -> Result<Connection, String> {
         .map_err(|error| error.to_string())
 }
 
+fn tab_list_is_candidate(kind: ProviderKind, child_roles: &[Option<String>]) -> bool {
+    // Brave can expose a non-document list containing panels and a slider.
+    // Only exclude it when every direct child role is known and none is a tab.
+    // An unsupported child remains a possible tab: uncertainty must not choose
+    // one real list over another. Other providers retain their existing rules.
+    kind != ProviderKind::Brave
+        || child_roles
+            .iter()
+            .any(|role| role.as_deref().is_none_or(|role| role == "page tab"))
+}
+
+fn select_tab_list(mut tab_lists: Vec<String>) -> Result<Option<String>, String> {
+    match tab_lists.len() {
+        0 => Ok(None),
+        1 => Ok(tab_lists.pop()),
+        count => Err(format!(
+            "AT-SPI frame exposes {count} page-tab lists; association is ambiguous"
+        )),
+    }
+}
+
 fn is_discovery_container(role: &str) -> bool {
     matches!(
         role,
@@ -946,9 +976,10 @@ fn select_frame(
 mod tests {
     use super::{
         adapter_for, close_decision, is_action_discovery_container, is_discovery_container,
-        is_skippable_discovery_error, launch_opt_in_status, select_frame, CachedFrame,
+        is_skippable_discovery_error, launch_opt_in_status, select_frame, select_tab_list,
+        tab_list_is_candidate, CachedFrame,
         DocumentCloseDecision, InternalDocumentState, ProviderCache, WindowGeometry,
-        UNKNOWN_METHOD_ERROR,
+        ProviderKind, UNKNOWN_METHOD_ERROR,
     };
     use crate::model::{Inspection, ProcessInfo, WindowFacts};
 
@@ -959,6 +990,67 @@ mod tests {
             minimum_persistent: 1,
             association_proof: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn brave_non_document_list_does_not_make_real_tab_strip_ambiguous() {
+        // Live Brave 1.96.59: one list has panels/slider; the other has three
+        // direct page tabs and two panels. Neither list needs a localized name.
+        let structural = ["panel", "panel", "panel", "panel", "slider", "panel"];
+        let tabs = ["page tab", "page tab", "page tab", "panel", "panel"];
+        let lists = [
+            ("/structural", structural.as_slice()),
+            ("/tabs", tabs.as_slice()),
+        ];
+        let candidates = lists
+            .into_iter()
+            .filter(|(_, roles)| {
+                let roles: Vec<_> = roles.iter().map(|role| Some((*role).into())).collect();
+                tab_list_is_candidate(ProviderKind::Brave, &roles)
+            })
+            .map(|(path, _)| path.to_string())
+            .collect();
+        assert_eq!(select_tab_list(candidates), Ok(Some("/tabs".into())));
+        assert_eq!(
+            close_decision(&known(3)),
+            DocumentCloseDecision::CloseActiveDocument
+        );
+        assert_eq!(
+            close_decision(&known(1)),
+            DocumentCloseDecision::PreserveTopLevelWindow
+        );
+    }
+
+    #[test]
+    fn brave_real_or_unreadable_tab_lists_keep_ambiguity_checks() {
+        assert!(tab_list_is_candidate(
+            ProviderKind::Brave,
+            &[Some("page tab".into())]
+        ));
+        assert!(tab_list_is_candidate(ProviderKind::Brave, &[None]));
+        assert!(select_tab_list(vec!["/tabs/one".into(), "/tabs/two".into()]).is_err());
+        assert_eq!(select_tab_list(Vec::new()), Ok(None));
+        assert!(!tab_list_is_candidate(ProviderKind::Brave, &[]));
+    }
+
+    #[test]
+    fn brave_list_filter_does_not_change_other_providers() {
+        let structural = [Some("panel".into()), Some("slider".into())];
+        assert!(tab_list_is_candidate(ProviderKind::Thunderbird, &structural));
+        assert!(tab_list_is_candidate(ProviderKind::TabList, &structural));
+        assert_eq!(
+            adapter_for("brave-origin").unwrap().close_document,
+            super::CloseDocumentMethod::ControlW
+        );
+        assert_eq!(
+            adapter_for("brave-origin").unwrap().close_top_level,
+            super::CloseTopLevelMethod::ControlShiftW
+        );
+        assert_eq!(
+            crate::compatibility::adapter_for("brave-origin").unwrap().quit,
+            crate::compatibility::CompatibilityQuit::CloseSingleLogicalWindow
+        );
+        assert!(adapter_for("brave-origin-crx-mjoklplbddabcmpepnokjaffbmgbkkgg").is_none());
     }
 
     #[test]
