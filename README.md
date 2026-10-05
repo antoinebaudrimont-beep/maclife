@@ -4,6 +4,8 @@ MacLife v0.7.0 is an experimental macOS-style application lifecycle layer for MX
 
 It runs as an XFCE/X11 user-session service with a conservative application policy and evidence-backed internal-tab handling for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. The title-bar X integration requires the separately patched, opt-in xfwm4 package; ordinary keyboard controls continue when that integration is unavailable. The user installer does not install or replace xfwm4. See [v0.7.0 release notes](docs/v0.7.0-release-notes.md) for changes and limitations.
 
+Current `main` additionally includes the [post-v0.7.0 terminal/Brave bootstrap corrections](docs/post-v0.7.0-terminal-bootstrap-robustness.md). These are not in the unchanged v0.7.0 tag; no new release has been published.
+
 | Input | What it requests |
 |---|---|
 | Command+W | Close the active supported tab/document, or preserve the final application window |
@@ -35,6 +37,7 @@ The installer builds an optimized binary, then installs only user-owned files:
 - `~/.local/libexec/maclife-brave-origin`
 - `~/.local/libexec/maclife-thunderbird`
 - `~/.local/libexec/maclife-xfce-mail-helper`
+- `~/.local/libexec/maclife-xfce-browser-helper`
 - `~/.local/libexec/maclife-launcher-refresh`
 - `~/.local/libexec/maclife-session-commands/thunderbird`
 - `~/.config/systemd/user/maclife.service`
@@ -43,6 +46,7 @@ The installer builds an optimized binary, then installs only user-owned files:
 - `~/.config/autostart/maclife.desktop`
 - user-level desktop overrides for Brave Browser, Brave Origin, and Thunderbird
 - a user-level XFCE MailReader helper for Thunderbird when Thunderbird is the selected mail reader
+- reversible command overrides for existing, recognized user-level XFCE Brave WebBrowser helpers (without changing the preferred browser)
 - a marked, reversible `~/.xsessionrc` block that adds only the Thunderbird session shim directory to graphical-session `PATH`
 
 If a destination already contains different content, the installer first creates a timestamped backup next to it. Original user desktop launchers are also recorded in `~/.local/share/maclife/launcher-backups` and restored by the uninstaller; Brave web-app launcher originals are recorded separately in `~/.local/share/maclife/pwa-launcher-backups`. A pre-existing `~/.local/share/xfce4/helpers/thunderbird.desktop` is recorded in `~/.local/share/maclife/xfce-helper-backups` and restored exactly. A later user edit is never silently overwritten. Vendor files in `/usr/share/applications` and `/usr/share/xfce4/helpers` are never modified. It starts MacLife immediately when invoked from an active X11 session; use `./scripts/install-user.sh --no-start` to defer startup until the next XFCE login. No root access is used.
@@ -117,7 +121,7 @@ cargo run -- restore featherpad
 
 The normal report includes the focused XID, title, normalized application identity, `WM_CLASS`, PID and validation result, client leader, window type/state, transient relationship, and the count/list of meaningful windows in the same application.
 
-Verbose mode adds one line for every managed client, explaining whether it was meaningful, attached, or excluded and which grouping rule matched it to the focused application. For Brave and Thunderbird it also reports AT-SPI availability and whether the validated running process actually contains its required launch opt-in.
+Verbose mode adds one line for every managed client, explaining whether it was meaningful, attached, or excluded and which grouping rule matched it to the focused application. For Brave and Thunderbird it also reports AT-SPI availability and whether the validated running process contains the managed launch opt-in. Healthy, safely associated accessibility state remains authoritative even without that exact opt-in.
 
 `run` passively grabs the dedicated X11 keycodes 191, 192, and 195. The Toshy mapping, active configuration path, and backup path are documented in [docs/toshy-control-channel.md](docs/toshy-control-channel.md). The installed service runs the equivalent of `maclife run`; manual `cargo run -- run` is only for development and will refuse while the service owns the singleton lock. Always use `--dry-run` first during development: it logs the selected action but never closes, hides, quits, or restores a window.
 
@@ -145,8 +149,8 @@ MacLife keeps four user intents separate:
 For `WindowClose`, an attached dialog receives native `WM_DELETE_WINDOW` on
 its exact XID. One of several meaningful top-level windows also receives native
 `WM_DELETE_WINDOW`. The final meaningful window follows the application policy:
-ordinary applications are hidden and marked for restore, while narrow native or
-terminal safety exceptions retain their existing behavior. Internal document
+ordinary applications and XFCE Terminal are hidden and marked for restore,
+while narrow native-lifecycle exceptions may retain native close. Internal document
 counts are deliberately absent from this decision.
 
 | Policy class | Command+W with 2+ meaningful windows | Command+W on final window | Command+Q |
@@ -155,7 +159,7 @@ counts are deliberately absent from this decision.
 | Ordinary generic application | Close focused window with `WM_DELETE_WINDOW` | Iconify and mark for restore | One window: exact `WM_DELETE_WINDOW`; multiple windows: refuse |
 | Dedicated quit adapter | Close focused window | Iconify and mark | Audited application API without process-termination fallback |
 | Native lifecycle application | Close focused window | Native close | One exact veto-capable native window close or refuse |
-| Terminal/safety-sensitive application | Close focused window | Native close | `WM_DELETE_WINDOW` for the exact client-leader group, preserving terminal confirmations |
+| XFCE Terminal/safety-sensitive application | Native close of focused window | Preserve/hide | `WM_DELETE_WINDOW` for the exact client-leader group, preserving terminal confirmations |
 | Excluded desktop/internal client | Refuse | Refuse | Refuse |
 | Ambiguous identity/process association | Refuse when window identity is unsafe | Refuse | Refuse rather than guess |
 
@@ -174,6 +178,8 @@ The installer creates user-level desktop overrides that preserve every vendor la
 
 XFCE's preferred MailReader is a separate launch path from the desktop launcher. When `MailReader=thunderbird`, the installer derives a user-owned `~/.local/share/xfce4/helpers/thunderbird.desktop` from XFCE's vendor helper and changes only `X-XFCE-Binaries` to the absolute MacLife Thunderbird wrapper. The original `%B`, mailto, and compose commands remain intact, so preferred-mail and parameterized helper launches inherit the same process-local accessibility setting. The uninstaller restores the exact prior user helper or removes the file if MacLife created it.
 
+XFCE's preferred WebBrowser helper is also separate from MIME desktop launchers: its `xdg-open` → `exo-open` route can execute helper command fields directly. The installer wraps only recognized commands in existing user-owned `brave-origin.desktop` and `brave-browser.desktop` helpers, preserving arguments, URL substitution, metadata and variant separation. It does not create a missing helper, change the preferred browser, or alter MIME defaults. Exact originals and managed snapshots are stored under `~/.local/share/maclife/xfce-helper-backups`; user edits or unsupported command forms refuse rather than being overwritten. Uninstall restores exact managed helpers before removing wrappers, and refuses if edited helpers would retain a dangling wrapper dependency. Direct vendor launches outside these managed routes can still lack tab accessibility. See [terminal and Brave bootstrap robustness](docs/post-v0.7.0-terminal-bootstrap-robustness.md).
+
 A Plank icon pinned to the absolute vendor Thunderbird desktop file bypasses that user launcher. MacLife does not rewrite live Plank pins during installation: doing so can create a duplicate icon. An optional, backed-up pin migration checks Plank's saved dock-item list and runs only while Plank is stopped; see [the post-reboot regression note](docs/thunderbird-post-reboot-plank-regression.md). An already-running Thunderbird still needs its own graceful Quit before the corrected launcher takes effect.
 
 Brave-generated user PWA/web-app launchers are conservatively recognized by their exact Brave executable and rewritten to the corresponding Browser or Origin wrapper while preserving `--profile-directory`, `--app-id`, and every other argument. Variant separation is never inferred from a shared process. Chromium's stable profile/app-id filename and its shortcut update path mean Brave may replace the same launcher later, so the event-driven refresher reapplies the wrapper and retains the first observed original for rollback. Ambiguous or unrelated launchers are refused. See Chromium's [Linux web-app shortcut implementation](https://chromium.googlesource.com/chromium/src/+/refs/heads/lkgr/chrome/browser/web_applications/os_integration/web_app_shortcut_linux.cc) and [shortcut interface](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/web_applications/os_integration/web_app_shortcut_linux.h).
@@ -186,7 +192,7 @@ Narrow exceptions remain because their implementation is safer than the generic 
 
 - Strawberry uses MPRIS Quit with no process-termination fallback.
 - Thunar uses `thunar --quit`.
-- XFCE Terminal retains native last-window close and confirmation-respecting `WM_DELETE_WINDOW`; distinct nonzero `WM_CLIENT_LEADER` values remain hard boundaries.
+- XFCE Terminal preserves its final window on Command+W or title-bar X. Non-final window close, explicit Shift+Command+W and Command+Q retain confirmation-respecting `WM_DELETE_WINDOW`; distinct nonzero `WM_CLIENT_LEADER` values remain hard boundaries. Kitty's internal tabs never influence title-bar X, which counts meaningful X11 top-level windows (including hidden siblings).
 - ChatGPT retains native last-window close because its own Electron/tray lifecycle already separates window close from application quit; Command+Q requests one native window close rather than signaling its process.
 - Brave Browser and Brave Origin retain strict variant validation, but Command+Q no longer signals their browser processes. One validated logical window receives `WM_DELETE_WINDOW`; multiple windows refuse.
 
