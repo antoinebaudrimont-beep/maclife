@@ -215,6 +215,28 @@ pub fn launch_opt_in_status(inspection: &Inspection) -> &'static str {
     }
 }
 
+fn with_launch_diagnostic(
+    inspection: &Inspection,
+    state: InternalDocumentState,
+) -> InternalDocumentState {
+    let InternalDocumentState::Unknown { reason } = state else {
+        // A healthy associated tab strip is the capability proof. Chromium
+        // may enable accessibility on demand without MacLife's launch flag.
+        return state;
+    };
+    if !matches!(inspection.app_identity.as_str(), "brave-origin" | "brave-browser") {
+        return InternalDocumentState::Unknown { reason };
+    }
+    let launch_reason = match launch_opt_in_status(inspection) {
+        "yes" => return InternalDocumentState::Unknown { reason },
+        "no" => "running browser process lacks the managed accessibility launch flag (--force-renderer-accessibility=basic); safely quit and relaunch through the managed launcher if accessibility remains unavailable",
+        _ => "browser accessibility launch configuration could not be validated",
+    };
+    InternalDocumentState::Unknown {
+        reason: format!("Brave document control unavailable: {reason}; {launch_reason}"),
+    }
+}
+
 fn is_null_accessible_path(path: &str) -> bool {
     matches!(
         path,
@@ -832,7 +854,10 @@ impl InternalDocumentProvider for AtspiDocumentProvider {
             };
         };
         if let Err(error) = self.connection() {
-            return InternalDocumentState::Unknown { reason: error };
+            return with_launch_diagnostic(
+                inspection,
+                InternalDocumentState::Unknown { reason: error },
+            );
         }
 
         let xid = inspection.identity_window.xid;
@@ -849,13 +874,14 @@ impl InternalDocumentProvider for AtspiDocumentProvider {
             }
         }
 
-        match self.discover(adapter, &inspection.identity_window) {
+        let state = match self.discover(adapter, &inspection.identity_window) {
             Ok((cached, state)) => {
                 self.cache.frames.insert(xid, cached);
                 state
             }
             Err(reason) => InternalDocumentState::Unknown { reason },
-        }
+        };
+        with_launch_diagnostic(inspection, state)
     }
 
     fn retain_windows(&mut self, windows: &[WindowFacts]) {
@@ -977,7 +1003,7 @@ mod tests {
     use super::{
         adapter_for, close_decision, is_action_discovery_container, is_discovery_container,
         is_skippable_discovery_error, launch_opt_in_status, select_frame, select_tab_list,
-        tab_list_is_candidate, CachedFrame,
+        tab_list_is_candidate, with_launch_diagnostic, CachedFrame,
         DocumentCloseDecision, InternalDocumentState, ProviderCache, WindowGeometry,
         ProviderKind, UNKNOWN_METHOD_ERROR,
     };
@@ -1236,6 +1262,73 @@ mod tests {
             decisions: Vec::new(),
         };
         assert_eq!(launch_opt_in_status(&inspection), "yes");
+        assert_eq!(with_launch_diagnostic(&inspection, known(3)), known(3));
+    }
+
+    #[test]
+    fn brave_missing_accessibility_capability_refuses_with_explicit_reason() {
+        let mut window = WindowFacts::test_window(10, "Brave-origin");
+        window.pid = Some(20);
+        window.pid_validated = true;
+        window.process = Some(ProcessInfo {
+            pid: 20,
+            uid: 1000,
+            parent_pid: Some(1),
+            name: "brave".to_string(),
+            executable: Some("/opt/brave.com/brave-origin/brave".to_string()),
+            command_line: Some("/opt/brave.com/brave-origin/brave https://example.org".to_string()),
+        });
+        let inspection = Inspection {
+            focused_xid: window.xid,
+            focused_window: window.clone(),
+            identity_window: window.clone(),
+            app_identity: "brave-origin".to_string(),
+            meaningful_windows: vec![window],
+            decisions: Vec::new(),
+        };
+        assert_eq!(launch_opt_in_status(&inspection), "no");
+        let unknown = with_launch_diagnostic(
+            &inspection,
+            InternalDocumentState::Unknown {
+                reason: "no associated AT-SPI tab strip".into(),
+            },
+        );
+        let InternalDocumentState::Unknown { reason } = unknown else {
+            panic!("missing provider capability must remain unknown");
+        };
+        assert!(reason.contains("Brave document control unavailable"));
+        assert!(reason.contains("--force-renderer-accessibility=basic"));
+        assert!(reason.contains("no associated AT-SPI tab strip"));
+        assert_eq!(
+            close_decision(&InternalDocumentState::Unknown { reason: reason.clone() }),
+            DocumentCloseDecision::Refuse(reason)
+        );
+        // The same unopted launch is supported when Chromium exposes a healthy
+        // tree on demand; flag absence alone must never override that proof.
+        assert_eq!(with_launch_diagnostic(&inspection, known(3)), known(3));
+    }
+
+    #[test]
+    fn brave_unvalidated_capability_refuses_without_guessing() {
+        let window = WindowFacts::test_window(10, "Brave-browser");
+        let inspection = Inspection {
+            focused_xid: window.xid,
+            focused_window: window.clone(),
+            identity_window: window.clone(),
+            app_identity: "brave-browser".to_string(),
+            meaningful_windows: vec![window],
+            decisions: Vec::new(),
+        };
+        assert_eq!(launch_opt_in_status(&inspection), "unavailable");
+        let unknown = with_launch_diagnostic(
+            &inspection,
+            InternalDocumentState::Unknown {
+                reason: "AT-SPI unavailable".into(),
+            },
+        );
+        assert!(matches!(unknown,
+            InternalDocumentState::Unknown { reason } if reason.contains("could not be validated")
+        ));
     }
 
     #[test]
