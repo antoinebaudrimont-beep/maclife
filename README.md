@@ -1,10 +1,10 @@
 # MacLife
 
-MacLife v0.7.0 is an experimental macOS-style application lifecycle layer for MX Linux/XFCE on X11. It separates closing a tab or window from quitting an application, while preserving the application's save prompts and right to cancel a destructive close.
+MacLife v0.7.1 is an experimental macOS-style application lifecycle layer for MX Linux/XFCE on X11. It separates closing a tab or window from quitting an application, while preserving the application's save prompts and right to cancel a destructive close.
 
-It runs as an XFCE/X11 user-session service with a conservative application policy and evidence-backed internal-tab handling for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. The title-bar X integration requires the separately patched, opt-in xfwm4 package; ordinary keyboard controls continue when that integration is unavailable. The user installer does not install or replace xfwm4. See [v0.7.0 release notes](docs/v0.7.0-release-notes.md) for changes and limitations.
+It runs as an XFCE/X11 user-session service with a conservative application policy and evidence-backed internal-tab handling for Brave Browser, Brave Origin, Thunderbird, and FeatherPad. The title-bar X integration requires the separately patched, opt-in xfwm4 package; ordinary keyboard controls continue when that integration is unavailable. The user installer does not install or replace xfwm4. See [v0.7.1 release notes](docs/v0.7.1-release-notes.md) for changes and limitations.
 
-Current `main` additionally includes the [post-v0.7.0 terminal/Brave bootstrap corrections](docs/post-v0.7.0-terminal-bootstrap-robustness.md). These are not in the unchanged v0.7.0 tag; no new release has been published.
+This patch includes the validated [terminal preservation and Brave bootstrap corrections](docs/post-v0.7.0-terminal-bootstrap-robustness.md). The earlier v0.7.0 tag remains unchanged.
 
 | Input | What it requests |
 |---|---|
@@ -15,15 +15,15 @@ Current `main` additionally includes the [post-v0.7.0 terminal/Brave bootstrap c
 
 Current limits: XFCE/X11 only; Command+H and Command+M are not implemented.
 The client-drawn X buttons in the GitHub Brave PWA and GNOME Calendar remain
-outside MacLife. See the [release notes](docs/v0.7.0-release-notes.md) for details.
+outside MacLife. See the [release notes](docs/v0.7.1-release-notes.md) for details.
 
 ## Install for the current user
 
 On the supported XFCE/X11 desktop, with Rust 1.85 or newer, install from the
-v0.7.0 tagged source:
+v0.7.1 tagged source:
 
 ```sh
-git clone --branch v0.7.0 --depth 1 https://github.com/antoinebaudrimont-beep/maclife.git
+git clone --branch v0.7.1 --depth 1 https://github.com/antoinebaudrimont-beep/maclife.git
 cd maclife
 ./scripts/install-user.sh
 ```
