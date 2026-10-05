@@ -145,6 +145,8 @@ install_atomic "$repo_dir/packaging/maclife-thunderbird" \
     "$helper_dir/maclife-thunderbird" 0755
 install_atomic "$repo_dir/packaging/maclife-xfce-mail-helper" \
     "$helper_dir/maclife-xfce-mail-helper" 0755
+install_atomic "$repo_dir/packaging/maclife-xfce-browser-helper" \
+    "$helper_dir/maclife-xfce-browser-helper" 0755
 install_atomic "$repo_dir/packaging/maclife-plank-thunderbird" \
     "$helper_dir/maclife-plank-thunderbird" 0755
 install_atomic "$repo_dir/packaging/maclife-launcher-refresh" \
@@ -174,6 +176,7 @@ install_launcher_override \
     thunderbird.desktop \
     "$helper_dir/maclife-thunderbird"
 "$helper_dir/maclife-xfce-mail-helper" install "$helper_dir/maclife-thunderbird"
+"$helper_dir/maclife-xfce-browser-helper" install "$helper_dir"
 install_xsession_command_path
 "$helper_dir/maclife-launcher-refresh"
 if command -v update-desktop-database >/dev/null 2>&1; then

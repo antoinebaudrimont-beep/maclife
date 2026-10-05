@@ -1,0 +1,191 @@
+#!/bin/sh
+set -eu
+umask 077
+
+usage() {
+    printf 'Usage: %s install /absolute/maclife/helper/directory | uninstall\n' "$0" >&2
+    exit 2
+}
+
+data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
+case "$data_home" in
+    /*) ;;
+    *) printf 'XDG_DATA_HOME must be absolute\n' >&2; exit 1 ;;
+esac
+target_dir=$data_home/xfce4/helpers
+state_dir=$data_home/maclife/xfce-helper-backups
+
+set_variant() {
+    variant=$1
+    target_file=$target_dir/$variant.desktop
+    original_file=$state_dir/$variant.desktop.original
+    managed_file=$state_dir/$variant.desktop.managed
+    case "$variant" in
+        brave-origin)
+            vendor=/usr/bin/brave-origin-stable
+            alternate=/opt/brave.com/brave-origin/brave-origin
+            ;;
+        brave-browser)
+            vendor=/usr/bin/brave-browser-stable
+            alternate=/opt/brave.com/brave/brave-browser
+            ;;
+        *) usage ;;
+    esac
+}
+
+regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || {
+        printf 'Refusing non-regular or symlinked XFCE helper state: %s\n' "$1" >&2
+        return 1
+    }
+}
+
+prepare_helper() {
+    [ -e "$target_file" ] || [ -L "$target_file" ] || return 0
+    regular_file "$target_file"
+    if [ -e "$original_file" ] || [ -L "$original_file" ] || \
+        [ -e "$managed_file" ] || [ -L "$managed_file" ]; then
+        regular_file "$original_file"
+        regular_file "$managed_file"
+        cmp -s "$target_file" "$managed_file" || {
+            printf 'Refusing user-modified XFCE browser helper: %s\n' "$target_file" >&2
+            return 1
+        }
+        source_file=$original_file
+    else
+        source_file=$target_file
+    fi
+    generated_file=$temporary_dir/$variant.desktop
+    awk -v vendor="$vendor" -v alternate="$alternate" -v wrapper="$helper_dir/maclife-$variant" '
+        function rewrite(command, parameter, executable, suffix, placeholders) {
+            executable = command
+            sub(/[[:space:]].*$/, "", executable)
+            if (executable != vendor && executable != alternate) {
+                invalid = 1
+                return command
+            }
+            suffix = substr(command, length(executable) + 1)
+            if (suffix ~ /[;&|`$]/ || suffix ~ /%B/) {
+                invalid = 1
+            }
+            placeholders = suffix
+            if (parameter) {
+                if (gsub(/%s/, "", placeholders) != 1 || placeholders ~ /%/) invalid = 1
+            } else if (placeholders ~ /%/) {
+                invalid = 1
+            }
+            return wrapper suffix
+        }
+        /^\[/ { entry = ($0 == "[Desktop Entry]"); if (entry) entries++ }
+        entry && /^Type=/ { if ($0 != "Type=X-XFCE-Helper") invalid = 1; types++ }
+        entry && /^X-XFCE-Category=/ { if ($0 != "X-XFCE-Category=WebBrowser") invalid = 1; categories++ }
+        entry && /^X-XFCE-Commands=/ {
+            commands++
+            print "X-XFCE-Commands=" rewrite(substr($0, 17), 0)
+            next
+        }
+        entry && /^X-XFCE-CommandsWithParameter=/ {
+            parameters++
+            print "X-XFCE-CommandsWithParameter=" rewrite(substr($0, 30), 1)
+            next
+        }
+        { print }
+        END {
+            if (invalid || entries != 1 || types != 1 || categories != 1 || commands != 1 || parameters != 1) exit 42
+        }
+    ' "$source_file" >"$generated_file" || {
+        printf 'Refusing unsupported or ambiguous XFCE browser helper commands: %s\n' "$target_file" >&2
+        return 1
+    }
+    chmod --reference="$target_file" "$generated_file"
+}
+
+install_helpers() {
+    [ "$#" -eq 1 ] || usage
+    helper_dir=$1
+    # Command fields use a plain absolute executable prefix. Refuse paths that
+    # require additional shell/desktop quoting instead of guessing its syntax.
+    case "$helper_dir" in
+        /*) ;;
+        *) printf 'MacLife helper directory must be absolute\n' >&2; return 1 ;;
+    esac
+    case "$helper_dir" in
+        *[!a-zA-Z0-9_./-]*) printf 'Unsupported characters in MacLife helper directory\n' >&2; return 1 ;;
+    esac
+    [ -d "$target_dir" ] || return 0
+    temporary_dir=$(mktemp -d "$data_home/.maclife-xfce-browser-helper.XXXXXX")
+    trap 'rm -rf -- "$temporary_dir"' EXIT HUP INT TERM
+    # Validate both variants before changing either existing user helper.
+    for candidate in brave-origin brave-browser; do
+        set_variant "$candidate"
+        [ -e "$target_file" ] || [ -L "$target_file" ] || continue
+        [ -x "$helper_dir/maclife-$variant" ] || {
+            printf 'MacLife browser wrapper is not executable: %s\n' "$helper_dir/maclife-$variant" >&2
+            return 1
+        }
+        prepare_helper
+    done
+    for candidate in brave-origin brave-browser; do
+        set_variant "$candidate"
+        generated_file=$temporary_dir/$variant.desktop
+        [ -e "$generated_file" ] || continue
+        mkdir -p -- "$state_dir"
+        if [ ! -e "$original_file" ]; then
+            cp -p -- "$target_file" "$original_file"
+        fi
+        mv -f -- "$generated_file" "$target_file"
+        cp -p -- "$target_file" "$managed_file"
+        printf 'Installed managed XFCE browser helper: %s\n' "$target_file"
+    done
+    rm -rf -- "$temporary_dir"
+    trap - EXIT HUP INT TERM
+}
+
+check_restore() {
+    if [ ! -e "$original_file" ] && [ ! -L "$original_file" ] && \
+        [ ! -e "$managed_file" ] && [ ! -L "$managed_file" ]; then
+        if [ -f "$target_file" ] && grep -Fq 'maclife-brave-' "$target_file"; then
+            printf 'Refusing uninstall: XFCE helper requires a MacLife wrapper without recoverable backup state: %s\n' "$target_file" >&2
+            return 1
+        fi
+        return 0
+    fi
+    regular_file "$original_file"
+    regular_file "$managed_file"
+    [ -e "$target_file" ] || [ -L "$target_file" ] || return 0
+    regular_file "$target_file"
+    if ! cmp -s "$target_file" "$managed_file" && \
+        grep -Fq 'maclife-brave-' "$target_file"; then
+        printf 'Refusing uninstall: user-modified XFCE helper still depends on a MacLife wrapper: %s\n' "$target_file" >&2
+        return 1
+    fi
+}
+
+uninstall_helpers() {
+    [ "$#" -eq 0 ] || usage
+    # A refusal must happen before any helper is restored or wrappers removed.
+    for candidate in brave-origin brave-browser; do
+        set_variant "$candidate"
+        check_restore
+    done
+    for candidate in brave-origin brave-browser; do
+        set_variant "$candidate"
+        [ -e "$original_file" ] && [ -e "$target_file" ] || continue
+        if cmp -s "$target_file" "$managed_file"; then
+            mv -f -- "$original_file" "$target_file"
+            rm -f -- "$managed_file"
+            printf 'Restored previous XFCE browser helper: %s\n' "$target_file"
+        else
+            printf 'Preserving user-modified XFCE browser helper and backup: %s\n' "$target_file"
+        fi
+    done
+}
+
+[ "$#" -ge 1 ] || usage
+mode=$1
+shift
+case "$mode" in
+    install) install_helpers "$@" ;;
+    uninstall) uninstall_helpers "$@" ;;
+    *) usage ;;
+esac

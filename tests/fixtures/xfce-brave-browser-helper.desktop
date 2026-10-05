@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=X-XFCE-Helper
+Name=Brave Browser
+X-XFCE-Category=WebBrowser
+X-XFCE-Commands=/usr/bin/brave-browser-stable
+X-XFCE-CommandsWithParameter=/usr/bin/brave-browser-stable "%s"
+Icon=brave-browser
+Exec=/usr/bin/brave-browser-stable %U

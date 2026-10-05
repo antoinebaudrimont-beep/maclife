@@ -9,6 +9,11 @@ elif [ "$#" -ne 0 ]; then
     exit 2
 fi
 
+if [ -x "${HOME}/.local/libexec/maclife-xfce-browser-helper" ]; then
+    # Stop before removing wrappers if an edited helper still requires them.
+    "${HOME}/.local/libexec/maclife-xfce-browser-helper" uninstall
+fi
+
 xfwm4_tool=${HOME}/.local/bin/maclife-xfwm4
 installed_xfwm4=$(dpkg-query -W -f='${Version}' xfwm4 2>/dev/null || true)
 if [ "$restore_stock" = true ]; then
@@ -112,6 +117,7 @@ rm -f -- \
     "${HOME}/.local/libexec/maclife-brave-origin" \
     "${HOME}/.local/libexec/maclife-thunderbird" \
     "${HOME}/.local/libexec/maclife-xfce-mail-helper" \
+    "${HOME}/.local/libexec/maclife-xfce-browser-helper" \
     "${HOME}/.local/libexec/maclife-plank-thunderbird" \
     "${HOME}/.local/libexec/maclife-launcher-refresh" \
     "${HOME}/.local/libexec/maclife-session-commands/thunderbird" \
