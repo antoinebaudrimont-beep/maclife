@@ -1424,6 +1424,74 @@ mod tests {
     }
 
     #[test]
+    fn xfce_terminal_final_document_and_window_close_preserve_native_safety() {
+        let mut terminal = process_window(10, "Xfce4-terminal", 123, "xfce4-terminal");
+        terminal.client_leader = Some(100);
+        let inspection = identity::inspect(10, vec![terminal]).expect("terminal inspection");
+        assert_eq!(inspection.meaningful_windows.len(), 1);
+        assert_eq!(
+            close_route(&inspection, FocusKind::Meaningful),
+            CloseRoute::ApplicationWindows
+        );
+        let (policy, decision, _) = application_window_close_decision(&inspection);
+        assert_eq!(policy.kind, crate::lifecycle::PolicyKind::TerminalSafety);
+        assert_eq!(decision, CloseDecision::HideLast);
+        assert_eq!(policy.quit, crate::lifecycle::QuitMethod::CloseEachWindow);
+        assert_eq!(top_level_close_target(&inspection), Ok(10));
+    }
+
+    #[test]
+    fn xfce_terminal_non_final_window_close_remains_exact_and_veto_capable() {
+        let mut first = process_window(10, "Xfce4-terminal", 123, "xfce4-terminal");
+        first.client_leader = Some(100);
+        let mut second = process_window(20, "Xfce4-terminal", 123, "xfce4-terminal");
+        second.client_leader = Some(100);
+        let snapshot = Snapshot {
+            active_window: 10,
+            windows: vec![first, second],
+        };
+        let inspection = inspect_close_target(&snapshot, 20).expect("clicked terminal inspection");
+        assert_eq!(inspection.meaningful_windows.len(), 2);
+        assert_eq!(
+            application_window_close_decision(&inspection).1,
+            CloseDecision::CloseFocused
+        );
+        assert_eq!(inspection.focused_xid, 20);
+        assert_eq!(top_level_close_target(&inspection), Ok(20));
+    }
+
+    #[test]
+    fn kitty_internal_tab_state_cannot_change_window_close_policy() {
+        // X11 carries a single OS-window XID regardless of Kitty's tab count.
+        // Titles can change as tabs/foreground programs change; neither title
+        // nor an internal-document adapter participates in WindowClose.
+        for title in ["btop", "zsh", "walite"] {
+            let mut kitty = process_window(10, "kitty", 123, "kitty");
+            kitty.title = Some(title.into());
+            let snapshot = Snapshot {
+                active_window: 10,
+                windows: vec![kitty],
+            };
+            let inspection = inspect_close_target(&snapshot, 10).expect("clicked kitty");
+            assert_eq!(inspection.meaningful_windows.len(), 1);
+            assert!(crate::documents::adapter_for(&inspection.app_identity).is_none());
+            assert_eq!(
+                close_route(&inspection, FocusKind::Meaningful),
+                CloseRoute::ApplicationWindows
+            );
+            assert_eq!(
+                application_window_close_decision(&inspection).1,
+                CloseDecision::HideLast
+            );
+            assert_eq!(top_level_close_target(&inspection), Ok(10));
+        }
+        assert_eq!(
+            crate::lifecycle::application_policy("kitty", true).quit,
+            crate::lifecycle::QuitMethod::NativeCloseSingleWindow
+        );
+    }
+
+    #[test]
     fn kitty_shared_process_without_leaders_counts_all_top_level_windows() {
         let first = process_window(10, "kitty", 123, "kitty");
         let mut second = process_window(20, "kitty", 123, "kitty");

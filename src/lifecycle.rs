@@ -82,7 +82,7 @@ pub fn application_policy(identity: &str, generic_eligible: bool) -> Application
         },
         "xfce4-terminal" => ApplicationPolicy {
             kind: PolicyKind::TerminalSafety,
-            last_window: LastWindowAction::NativeClose,
+            last_window: LastWindowAction::Hide,
             quit: QuitMethod::CloseEachWindow,
         },
         "brave-origin" | "brave-browser" => ApplicationPolicy {
@@ -408,7 +408,7 @@ mod tests {
     fn terminal_and_native_lifecycle_exceptions_remain_narrow() {
         let terminal = application_policy("xfce4-terminal", true);
         assert_eq!(terminal.kind, PolicyKind::TerminalSafety);
-        assert_eq!(terminal.last_window, LastWindowAction::NativeClose);
+        assert_eq!(terminal.last_window, LastWindowAction::Hide);
         assert_eq!(terminal.quit, QuitMethod::CloseEachWindow);
 
         let chatgpt = application_policy("chatgpt", true);
